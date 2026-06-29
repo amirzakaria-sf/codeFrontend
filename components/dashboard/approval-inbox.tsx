@@ -54,9 +54,9 @@ export function ApprovalInbox({
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-amber-200">Approval Inbox</p>
-          <h2 className="mt-2 text-xl font-semibold text-white">Queued requests from locked workspaces</h2>
+          <h2 className="mt-2 text-xl font-semibold text-white">Queued task approvals</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Only lock owners or admins can review these requests.
+            You can review requests for workspaces you own, workspaces you currently lock, or any workspace if you are an admin.
           </p>
         </div>
         <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-slate-200">{approvals.length} pending</span>

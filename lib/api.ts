@@ -9,11 +9,15 @@ import type {
   OpenCodeSessionActiveResponse,
   OpenCodeSessionStatusMap,
   OperationsDashboard,
+  OrchestrationArtifact,
+  OrchestrationPlanStep,
+  OrchestrationRunActivity,
   OrchestrationRun,
   PendingApprovalItem,
   ProjectUsageSummary,
   Project,
   ProvisionProjectPayload,
+  RunPlanResponse,
   TaskQueue,
   TokenUsageEvent,
   UploadedReference,
@@ -39,6 +43,47 @@ export class ApiError extends Error {
 }
 
 let refreshPromise: Promise<string | null> | null = null
+
+function extractApiErrorMessage(payload: unknown): string | null {
+  if (!payload) return null
+
+  if (typeof payload === "string") {
+    const normalized = payload.trim()
+    return normalized || null
+  }
+
+  if (typeof payload !== "object") return null
+
+  const detail = (payload as { detail?: unknown }).detail
+  if (typeof detail === "string" && detail.trim()) return detail.trim()
+
+  const messages: string[] = []
+
+  const collect = (value: unknown, prefix = ""): void => {
+    if (messages.length >= 4) return
+    if (typeof value === "string") {
+      const normalized = value.trim()
+      if (!normalized) return
+      messages.push(prefix ? `${prefix}: ${normalized}` : normalized)
+      return
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => collect(item, prefix))
+      return
+    }
+    if (!value || typeof value !== "object") return
+    Object.entries(value as Record<string, unknown>).forEach(([key, nested]) => {
+      if (key === "detail") return
+      const keyLabel = key.replaceAll("_", " ")
+      const nestedPrefix = prefix ? `${prefix} · ${keyLabel}` : keyLabel
+      collect(nested, nestedPrefix)
+    })
+  }
+
+  collect(payload)
+  if (!messages.length) return null
+  return messages.join("; ")
+}
 
 export async function refreshAccessToken(): Promise<string | null> {
   if (refreshPromise) return refreshPromise
@@ -110,7 +155,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     let message = `Request failed with status ${response.status}`
     try {
       const payload = await response.json()
-      message = payload.detail ?? JSON.stringify(payload)
+      message = extractApiErrorMessage(payload) ?? message
     } catch {
       // Keep fallback message.
     }
@@ -153,7 +198,7 @@ async function requestFormData<T>(path: string, formData: FormData, options: Req
     let message = `Request failed with status ${response.status}`
     try {
       const payload = await response.json()
-      message = payload.detail ?? JSON.stringify(payload)
+      message = extractApiErrorMessage(payload) ?? message
     } catch {
       // Keep fallback message.
     }
@@ -239,6 +284,26 @@ export const api = {
   },
   runs: (projectId: number) => request<OrchestrationRun[]>(`/projects/${projectId}/runs/`),
   run: (projectId: number, runId: number) => request<OrchestrationRun>(`/projects/${projectId}/runs/${runId}/`),
+  runActivities: (projectId: number, runId: number) =>
+    request<OrchestrationRunActivity[]>(`/projects/${projectId}/runs/${runId}/activities/`),
+  runArtifacts: (projectId: number, runId: number) =>
+    request<OrchestrationArtifact[]>(`/projects/${projectId}/runs/${runId}/artifacts/`),
+  runPlan: (projectId: number, runId: number) => request<RunPlanResponse>(`/projects/${projectId}/runs/${runId}/plan/`),
+  updatePlanStep: (projectId: number, runId: number, stepId: number, payload: Partial<Pick<OrchestrationPlanStep, "assigned_agent" | "instruction_payload" | "sequence_order">>) =>
+    request<OrchestrationPlanStep>(`/projects/${projectId}/runs/${runId}/plan/${stepId}/`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  approvePlan: (projectId: number, runId: number) =>
+    request<{ mode: string; run_id: number; celery_task_id?: string; status: string }>(`/projects/${projectId}/runs/${runId}/approve-plan/`, {
+      method: "POST",
+      body: JSON.stringify({ approved: true }),
+    }),
+  replanRun: (projectId: number, runId: number, feedback = "") =>
+    request<{ mode: string; run_id: number; celery_task_id?: string; status: string }>(`/projects/${projectId}/runs/${runId}/replan/`, {
+      method: "POST",
+      body: JSON.stringify({ feedback }),
+    }),
   usageSummary: (projectId: number) => request<ProjectUsageSummary>(`/projects/${projectId}/usage-summary/`),
   runUsageEvents: (projectId: number, runId: number) =>
     request<TokenUsageEvent[]>(`/projects/${projectId}/runs/${runId}/usage-events/`),

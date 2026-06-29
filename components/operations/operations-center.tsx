@@ -61,7 +61,7 @@ export function OperationsCenter() {
     const needle = filter.toLowerCase().trim()
     const projects = payload?.projects ?? []
     if (!needle) return projects
-    return projects.filter((project) => `${project.name} ${project.absolute_path} ${project.workspace_mode} ${project.locked_by_username ?? ""}`.toLowerCase().includes(needle))
+    return projects.filter((project) => `${project.name} ${project.host_path ?? project.runtime_path ?? project.absolute_path} ${project.workspace_mode} ${project.locked_by_username ?? ""}`.toLowerCase().includes(needle))
   }, [filter, payload])
 
   return (
@@ -153,7 +153,7 @@ function RunsTable({ runs }: { runs: OrchestrationRun[] }) {
         {runs.map((run) => (
           <tr key={run.id}>
             <td className="p-2"><Link className="text-cyan-300 hover:text-cyan-200" href={`/dashboard/projects/${run.project}`}>#{run.id}</Link></td>
-            <td className="p-2">{run.status}</td>
+            <td className="p-2">{formatEnumLabel(run.status)}</td>
             <td className="p-2">{run.progress_percent}%</td>
             <td className="p-2 font-mono">{run.total_tokens.toLocaleString()}</td>
             <td className="max-w-xl truncate p-2">{run.prompt}</td>
@@ -174,7 +174,7 @@ function SyncTable({ jobs }: { jobs: GitSyncJob[] }) {
       <tbody className="divide-y divide-white/10 text-slate-300">
         {jobs.map((job) => (
           <tr key={job.id}>
-            <td className="p-2">#{job.id}</td><td className="p-2">{job.status}</td><td className="p-2 font-mono">{job.feature_branch || "—"}</td>
+            <td className="p-2">#{job.id}</td><td className="p-2">{formatEnumLabel(job.status)}</td><td className="p-2 font-mono">{job.feature_branch || "—"}</td>
             <td className="p-2">{job.pr_url ? <a className="text-cyan-300 hover:text-cyan-200" href={job.pr_url} target="_blank" rel="noreferrer">PR #{job.pr_number}</a> : "—"}</td>
             <td className="max-w-md truncate p-2 text-red-200">{job.last_error}</td>
           </tr>
@@ -205,11 +205,19 @@ function ProjectsTable({ projects }: { projects: OperationsDashboard["projects"]
       <thead className="text-xs uppercase text-slate-500"><tr><th className="p-2">Project</th><th className="p-2">Mode</th><th className="p-2">Lock</th><th className="p-2">Daemon</th><th className="p-2">Targets</th></tr></thead>
       <tbody className="divide-y divide-white/10 text-slate-300">
         {projects.map((project) => (
-          <tr key={project.id}><td className="p-2"><Link className="text-cyan-300 hover:text-cyan-200" href={`/dashboard/projects/${project.id}`}>{project.name}</Link></td><td className="p-2">{project.workspace_mode}</td><td className="p-2">{project.is_locked ? `Locked by ${project.locked_by_username ?? "unknown"}` : "Open"}</td><td className="p-2">{project.daemon_pid ? `${project.allocated_port}/${project.daemon_pid}` : "Stopped"}</td><td className="p-2">{project.targets.length}</td></tr>
+          <tr key={project.id}><td className="p-2"><Link className="text-cyan-300 hover:text-cyan-200" href={`/dashboard/projects/${project.id}`}>{project.name}</Link></td><td className="p-2">{formatEnumLabel(project.workspace_mode)}</td><td className="p-2">{project.is_locked ? `Locked by ${project.locked_by_username ?? "unknown"}` : "Open"}</td><td className="p-2">{project.daemon_pid ? `${project.allocated_port}/${project.daemon_pid}` : "Stopped"}</td><td className="p-2">{project.targets.length}</td></tr>
         ))}
       </tbody>
     </table>
   )
+}
+
+function formatEnumLabel(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((segment) => (segment ? `${segment[0].toUpperCase()}${segment.slice(1)}` : segment))
+    .join(" ")
 }
 
 function Empty() {

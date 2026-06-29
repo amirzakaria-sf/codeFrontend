@@ -11,9 +11,13 @@ export function ProjectCard({ project }: { project: Project }) {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">{project.name}</h2>
-          <p className="mt-1 max-w-full truncate text-sm text-slate-400">{project.absolute_path}</p>
+          <p className="mt-1 text-[11px] uppercase tracking-wide text-slate-500">Workspace path</p>
+          <p className="mt-1 max-w-full truncate font-mono text-sm text-slate-400">{project.host_path ?? project.runtime_path ?? project.absolute_path}</p>
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
             <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1 text-cyan-100">{projectModeLabel(project)}</span>
+            {project.path_owner_username ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-slate-300">owner path: {project.path_owner_username}</span>
+            ) : null}
             <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-slate-300">
               {project.targets.length} target{project.targets.length === 1 ? "" : "s"}
             </span>

@@ -55,8 +55,14 @@ export type WorkspaceTarget = {
 
 export type Project = {
   id: number
+  owner: number | null
+  owner_username?: string | null
+  path_owner_username: string
   name: string
   absolute_path: string
+  runtime_path: string
+  host_path: string | null
+  storage_mode: string
   workspace_mode: WorkspaceMode
   starter_template: StarterTemplate | ""
   setup_status: ProjectSetupStatus
@@ -121,11 +127,30 @@ export type OrchestrationRunStatus =
   | "QUEUED"
   | "PLANNING"
   | "BREAKING_DOWN"
+  | "PLAN_READY"
+  | "AWAITING_PLAN_APPROVAL"
   | "RUNNING"
   | "VERIFYING"
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED"
+
+export type OrchestrationApprovalScope = "NONE" | "LOCK" | "PLAN"
+export type OrchestrationComplexityLevel = "SIMPLE" | "COMPLEX"
+
+export type OrchestrationPlanStepStatus = "DRAFT" | "APPROVED" | "REPLACED"
+
+export type OrchestrationPlanStep = {
+  id: number
+  run: number
+  sequence_order: number
+  assigned_agent: string
+  instruction_payload: string
+  status: OrchestrationPlanStepStatus
+  planner_notes: string
+  created_at: string
+  updated_at: string
+}
 
 export type OrchestrationStep = {
   id: number
@@ -149,6 +174,9 @@ export type OrchestrationRun = {
   user: number | null
   user_username: string | null
   prompt: string
+  approval_scope: OrchestrationApprovalScope
+  complexity_level: OrchestrationComplexityLevel
+  plan_requires_approval: boolean
   status: OrchestrationRunStatus
   current_phase: string
   progress_percent: number
@@ -167,11 +195,50 @@ export type OrchestrationRun = {
   stuck_recovery_count: number
   last_recovery_at: string | null
   last_recovery_error: string
+  plan_approved_at: string | null
   started_at: string | null
   finished_at: string | null
   created_at: string
   updated_at: string
+  plan_steps: OrchestrationPlanStep[]
   steps: OrchestrationStep[]
+}
+
+export type OrchestrationRunActivity = {
+  id: number
+  run: number
+  step: number | null
+  task: number | null
+  kind: string
+  level: "INFO" | "WARNING" | "ERROR"
+  session_id: string
+  attempt_count: number
+  message: string
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+export type OrchestrationArtifact = {
+  id: number
+  run: number
+  step: number | null
+  task: number | null
+  artifact_type: string
+  session_id: string
+  label: string
+  content: string
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+export type RunPlanResponse = {
+  run_id: number
+  status: OrchestrationRunStatus
+  approval_scope: OrchestrationApprovalScope
+  complexity_level: OrchestrationComplexityLevel
+  plan_requires_approval: boolean
+  plan_approved_at: string | null
+  steps: OrchestrationPlanStep[]
 }
 
 export type AuditLog = {

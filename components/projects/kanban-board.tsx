@@ -11,9 +11,13 @@ import type {
   GitSyncJob,
   OpenCodeSession,
   OpenCodeSessionStatusMap,
+  OrchestrationArtifact,
+  OrchestrationPlanStep,
+  OrchestrationRunActivity,
   OrchestrationRun,
   ProjectUsageSummary,
   Project,
+  RunPlanResponse,
   TaskQueue,
   TaskStatus,
   TokenUsageEvent,
@@ -63,10 +67,16 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
   const [syncJobs, setSyncJobs] = useState<GitSyncJob[]>([])
   const [usageSummary, setUsageSummary] = useState<ProjectUsageSummary | null>(null)
   const [latestRunUsageEvents, setLatestRunUsageEvents] = useState<TokenUsageEvent[]>([])
+  const [latestRunActivities, setLatestRunActivities] = useState<OrchestrationRunActivity[]>([])
+  const [latestRunArtifacts, setLatestRunArtifacts] = useState<OrchestrationArtifact[]>([])
+  const [latestRunPlan, setLatestRunPlan] = useState<RunPlanResponse | null>(null)
   const [daemonPortInput, setDaemonPortInput] = useState("8010")
   const [pendingReferences, setPendingReferences] = useState<UploadedReference[]>([])
   const [isUploadingReference, setIsUploadingReference] = useState(false)
   const [isPreparingWorkspace, setIsPreparingWorkspace] = useState(false)
+  const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState("")
+  const [isPlanActionLoading, setIsPlanActionLoading] = useState(false)
+  const [replanFeedback, setReplanFeedback] = useState("")
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadSessionDetails = useCallback(
@@ -153,13 +163,27 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
 
     if (runPayload[0]?.id) {
       try {
-        const usageEventsPayload = await api.runUsageEvents(projectId, runPayload[0].id)
+        const [usageEventsPayload, activitiesPayload, artifactsPayload, planPayload] = await Promise.all([
+          api.runUsageEvents(projectId, runPayload[0].id),
+          api.runActivities(projectId, runPayload[0].id),
+          api.runArtifacts(projectId, runPayload[0].id),
+          api.runPlan(projectId, runPayload[0].id),
+        ])
         setLatestRunUsageEvents(usageEventsPayload)
+        setLatestRunActivities(activitiesPayload)
+        setLatestRunArtifacts(artifactsPayload)
+        setLatestRunPlan(planPayload)
       } catch {
         setLatestRunUsageEvents([])
+        setLatestRunActivities([])
+        setLatestRunArtifacts([])
+        setLatestRunPlan(null)
       }
     } else {
       setLatestRunUsageEvents([])
+      setLatestRunActivities([])
+      setLatestRunArtifacts([])
+      setLatestRunPlan(null)
     }
   }, [loadSessionDetails, projectId, selectedSessionId])
 
@@ -225,7 +249,9 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       const referenceContext = pendingReferences.length
         ? `\n\nReference files available in doc-references/ for this run:\n${pendingReferences.map((reference) => `- ${reference.relative_path}`).join("\n")}`
         : ""
-      const response = await api.executePrompt(projectId, `${prompt}${referenceContext}`)
+      const composedPrompt = `${prompt}${referenceContext}`
+      setLastSubmittedPrompt(composedPrompt)
+      const response = await api.executePrompt(projectId, composedPrompt)
       setPrompt("")
       setPendingReferences([])
       await load()
@@ -235,6 +261,52 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       setError(executeError instanceof Error ? executeError.message : "Unable to execute prompt")
     } finally {
       setIsExecuting(false)
+    }
+  }
+
+  async function updatePlanStep(step: OrchestrationPlanStep, payload: Partial<Pick<OrchestrationPlanStep, "assigned_agent" | "instruction_payload" | "sequence_order">>) {
+    if (!latestRun) return
+    setError("")
+    try {
+      await api.updatePlanStep(projectId, latestRun.id, step.id, payload)
+      await load()
+      pushToast(`Updated plan step #${step.sequence_order}.`, "success")
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Unable to update plan step")
+      pushToast("Unable to update plan step.", "error")
+    }
+  }
+
+  async function approveLatestPlan() {
+    if (!latestRun) return
+    setIsPlanActionLoading(true)
+    setError("")
+    try {
+      await api.approvePlan(projectId, latestRun.id)
+      await load()
+      pushToast(`Approved run #${latestRun.id} plan. Execution queued.`, "success")
+    } catch (approvalError) {
+      setError(approvalError instanceof Error ? approvalError.message : "Unable to approve plan")
+      pushToast("Unable to approve plan.", "error")
+    } finally {
+      setIsPlanActionLoading(false)
+    }
+  }
+
+  async function requestLatestReplan() {
+    if (!latestRun) return
+    setIsPlanActionLoading(true)
+    setError("")
+    try {
+      await api.replanRun(projectId, latestRun.id, replanFeedback)
+      setReplanFeedback("")
+      await load()
+      pushToast(`Requested replan for run #${latestRun.id}.`, "info")
+    } catch (replanError) {
+      setError(replanError instanceof Error ? replanError.message : "Unable to request replan")
+      pushToast("Unable to request replan.", "error")
+    } finally {
+      setIsPlanActionLoading(false)
     }
   }
 
@@ -436,7 +508,18 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
             ← Back to workspaces
           </Link>
           <h1 className="mt-3 text-3xl font-semibold tracking-tight text-white">{project?.name ?? "Workspace"}</h1>
-          <p className="mt-2 max-w-3xl text-slate-400">{project?.absolute_path ?? "Loading project path…"}</p>
+          <div className="mt-3 grid max-w-5xl gap-2 text-xs sm:grid-cols-2">
+            <PathPill
+              label="VM path"
+              value={project?.host_path ?? "Loading host path…"}
+              helper={project?.storage_mode ? `storage: ${project.storage_mode}` : "Host-visible generated code location"}
+            />
+            <PathPill
+              label="Runtime path"
+              value={project?.runtime_path ?? project?.absolute_path ?? "Loading runtime path…"}
+              helper={project?.path_owner_username ? `owner path: ${project.path_owner_username}` : "Path used inside backend/celery containers"}
+            />
+          </div>
           <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
             <span className={`rounded-full border px-3 py-1 ${project?.is_locked ? "border-amber-300/30 bg-amber-300/10 text-amber-100" : "border-emerald-300/30 bg-emerald-300/10 text-emerald-100"}`}>
               {project?.is_locked ? `Locked by ${project.locked_by_username ?? "unknown"}` : "Unlocked"}
@@ -563,6 +646,25 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         </div>
       </form>
 
+      <ActivityPanel
+        latestRun={latestRun}
+        lastSubmittedPrompt={lastSubmittedPrompt}
+        activities={latestRunActivities}
+        artifacts={latestRunArtifacts}
+        events={events}
+      />
+
+      <PlanReviewPanel
+        latestRun={latestRun}
+        plan={latestRunPlan}
+        isLoading={isPlanActionLoading}
+        replanFeedback={replanFeedback}
+        onReplanFeedbackChange={setReplanFeedback}
+        onApprove={approveLatestPlan}
+        onReplan={requestLatestReplan}
+        onUpdateStep={updatePlanStep}
+      />
+
       <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -574,8 +676,8 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         {latestRun ? (
           <div className="mt-4 space-y-3">
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-cyan-100">{latestRun.status}</span>
-              <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{latestRun.current_phase}</span>
+              <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-cyan-100">{formatRunStatusLabel(latestRun.status)}</span>
+              <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{latestRun.current_phase || "Awaiting next transition"}</span>
               <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{latestRun.completed_steps}/{latestRun.total_steps || 0} steps</span>
             </div>
             <div>
@@ -612,7 +714,7 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         {latestSyncJob ? (
           <div className="mt-3 space-y-2 text-sm text-slate-300">
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-cyan-100">{latestSyncJob.status}</span>
+              <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-cyan-100">{formatEnumLabel(latestSyncJob.status)}</span>
               <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1">{latestSyncJob.feature_branch || "(pending branch)"}</span>
               <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1">base: {latestSyncJob.base_branch}</span>
             </div>
@@ -808,6 +910,310 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       />
     </div>
   )
+}
+
+function PathPill({ label, value, helper }: { label: string; value: string | null | undefined; helper: string }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium uppercase tracking-wide text-slate-500">{label}</span>
+        <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-slate-400">{helper}</span>
+      </div>
+      <p className="mt-2 break-all font-mono text-slate-200">{value || "Unavailable"}</p>
+    </div>
+  )
+}
+
+function ActivityPanel({
+  latestRun,
+  lastSubmittedPrompt,
+  activities,
+  artifacts,
+  events,
+}: {
+  latestRun: OrchestrationRun | null
+  lastSubmittedPrompt: string
+  activities: OrchestrationRunActivity[]
+  artifacts: OrchestrationArtifact[]
+  events: WorkspaceEvent[]
+}) {
+  const recentActivities = activities.slice(-8).reverse()
+  const visibleEvents = events.slice(0, 4)
+  const userPrompt = lastSubmittedPrompt || latestRun?.prompt || ""
+
+  return (
+    <section className="rounded-3xl border border-cyan-300/15 bg-cyan-300/[0.04] p-4 shadow-xl">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-sm font-medium text-cyan-200">Live orchestration</p>
+          <h2 className="mt-1 text-lg font-semibold text-white">Conversation-style activity</h2>
+          <p className="mt-1 text-sm text-slate-400">Prompts, planning, approval, execution, retries, and diagnostics appear here as they happen.</p>
+        </div>
+        {latestRun ? <RunStatusBadge run={latestRun} /> : null}
+      </div>
+
+      <div className="mt-4 space-y-3">
+        {userPrompt ? (
+          <div className="ml-auto max-w-3xl rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-cyan-100">You</p>
+            <p className="mt-2 whitespace-pre-wrap text-sm text-slate-100">{userPrompt}</p>
+          </div>
+        ) : null}
+
+        {latestRun ? (
+          <div className="max-w-3xl rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Foundry-AI</p>
+            <p className="mt-2 text-sm text-slate-200">{humanizeRunStatus(latestRun)}</p>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-900">
+              <div className="h-full rounded-full bg-cyan-300 transition-all" style={{ width: `${latestRun.progress_percent}%` }} />
+            </div>
+          </div>
+        ) : (
+          <p className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-500">Submit a prompt to start a live orchestration thread.</p>
+        )}
+
+        {recentActivities.map((activity) => (
+          <div key={activity.id} className={`max-w-3xl rounded-2xl border px-4 py-3 ${activity.level === "ERROR" ? "border-red-300/20 bg-red-500/10" : activity.level === "WARNING" ? "border-amber-300/20 bg-amber-300/10" : "border-white/10 bg-slate-950/60"}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold uppercase tracking-wide text-slate-400">{formatActivityKind(activity.kind)}</span>
+              <span className="text-slate-500">{new Date(activity.created_at).toLocaleTimeString()}</span>
+            </div>
+            <p className="mt-2 whitespace-pre-wrap text-sm text-slate-200">{activity.message || formatActivityKind(activity.kind)}</p>
+            {activity.step ? <p className="mt-2 text-xs text-slate-500">Step #{activity.step}{activity.attempt_count ? ` · attempt ${activity.attempt_count}` : ""}</p> : null}
+          </div>
+        ))}
+
+        {artifacts.length ? (
+          <div className="max-w-3xl rounded-2xl border border-violet-300/20 bg-violet-300/10 px-4 py-3 text-sm text-violet-100">
+            {artifacts.length} durable artifact{artifacts.length === 1 ? "" : "s"} captured for this run: {summarizeArtifactTypes(artifacts)}.
+          </div>
+        ) : null}
+
+        {visibleEvents.length ? (
+          <div className="max-w-3xl rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Realtime signals</p>
+            <div className="mt-2 space-y-1 text-xs text-slate-400">
+              {visibleEvents.map((event, index) => (
+                <p key={`${event.kind}-${index}`}>{humanizeWorkspaceEvent(event)}</p>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function PlanReviewPanel({
+  latestRun,
+  plan,
+  isLoading,
+  replanFeedback,
+  onReplanFeedbackChange,
+  onApprove,
+  onReplan,
+  onUpdateStep,
+}: {
+  latestRun: OrchestrationRun | null
+  plan: RunPlanResponse | null
+  isLoading: boolean
+  replanFeedback: string
+  onReplanFeedbackChange: (value: string) => void
+  onApprove: () => Promise<void>
+  onReplan: () => Promise<void>
+  onUpdateStep: (step: OrchestrationPlanStep, payload: Partial<Pick<OrchestrationPlanStep, "assigned_agent" | "instruction_payload" | "sequence_order">>) => Promise<void>
+}) {
+  if (!latestRun || !plan || !plan.steps.length) return null
+
+  const awaitingApproval = latestRun.status === "AWAITING_PLAN_APPROVAL"
+  const activeSteps = plan.steps.filter((step) => step.status !== "REPLACED")
+
+  return (
+    <section className={`rounded-3xl border p-4 shadow-xl ${awaitingApproval ? "border-amber-300/25 bg-amber-300/[0.05]" : "border-white/10 bg-white/[0.04]"}`}>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-sm font-medium text-amber-200">Plan review</p>
+          <h2 className="mt-1 text-lg font-semibold text-white">Generated execution plan</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            {awaitingApproval ? "This complex plan is paused for your review. Edit steps, approve, or request a replan." : "This is the persisted plan snapshot for the latest run."}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{formatEnumLabel(plan.complexity_level)}</span>
+          <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{activeSteps.length} step{activeSteps.length === 1 ? "" : "s"}</span>
+          {awaitingApproval ? <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-amber-100">Awaiting approval</span> : null}
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-3">
+        {activeSteps.map((step) => (
+          <EditablePlanStep key={`${step.id}-${step.updated_at}`} step={step} disabled={!awaitingApproval || isLoading} onSave={onUpdateStep} />
+        ))}
+      </div>
+
+      {awaitingApproval ? (
+        <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <label htmlFor="replan-feedback" className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Replan feedback optional
+          </label>
+          <textarea
+            id="replan-feedback"
+            value={replanFeedback}
+            onChange={(event) => onReplanFeedbackChange(event.target.value)}
+            rows={3}
+            placeholder="Tell the planner what to change before regenerating the plan…"
+            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950/80 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300"
+          />
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <button
+              onClick={onReplan}
+              disabled={isLoading}
+              className="rounded-xl border border-amber-300/30 px-4 py-2 text-sm font-medium text-amber-100 hover:bg-amber-300/10 disabled:opacity-60"
+            >
+              Request replan
+            </button>
+            <button
+              onClick={onApprove}
+              disabled={isLoading}
+              className="rounded-xl bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-200 disabled:opacity-60"
+            >
+              {isLoading ? "Submitting…" : "Approve plan & execute"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function EditablePlanStep({
+  step,
+  disabled,
+  onSave,
+}: {
+  step: OrchestrationPlanStep
+  disabled: boolean
+  onSave: (step: OrchestrationPlanStep, payload: Partial<Pick<OrchestrationPlanStep, "assigned_agent" | "instruction_payload" | "sequence_order">>) => Promise<void>
+}) {
+  const [sequenceOrder, setSequenceOrder] = useState(String(step.sequence_order))
+  const [assignedAgent, setAssignedAgent] = useState(step.assigned_agent)
+  const [instruction, setInstruction] = useState(step.instruction_payload)
+  const [isSaving, setIsSaving] = useState(false)
+
+  async function save() {
+    const parsedOrder = Number.parseInt(sequenceOrder, 10)
+    setIsSaving(true)
+    try {
+      await onSave(step, {
+        sequence_order: Number.isNaN(parsedOrder) ? step.sequence_order : parsedOrder,
+        assigned_agent: assignedAgent,
+        instruction_payload: instruction,
+      })
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <article className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+      <div className="grid gap-3 md:grid-cols-[90px_180px_minmax(0,1fr)_auto] md:items-start">
+        <label className="text-xs text-slate-400">
+          Order
+          <input
+            value={sequenceOrder}
+            onChange={(event) => setSequenceOrder(event.target.value)}
+            disabled={disabled || isSaving}
+            className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/80 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300 disabled:opacity-60"
+          />
+        </label>
+        <label className="text-xs text-slate-400">
+          Agent
+          <input
+            value={assignedAgent}
+            onChange={(event) => setAssignedAgent(event.target.value)}
+            disabled={disabled || isSaving}
+            className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/80 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300 disabled:opacity-60"
+          />
+        </label>
+        <label className="text-xs text-slate-400">
+          Instruction
+          <textarea
+            value={instruction}
+            onChange={(event) => setInstruction(event.target.value)}
+            disabled={disabled || isSaving}
+            rows={3}
+            className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/80 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300 disabled:opacity-60"
+          />
+        </label>
+        <button
+          onClick={save}
+          disabled={disabled || isSaving || !instruction.trim() || !assignedAgent.trim()}
+          className="rounded-xl border border-cyan-300/30 px-4 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60 md:mt-5"
+        >
+          {isSaving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </article>
+  )
+}
+
+function RunStatusBadge({ run }: { run: OrchestrationRun }) {
+  return (
+    <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs text-cyan-100">
+      Run #{run.id} · {formatRunStatusLabel(run.status)} · {run.progress_percent}%
+    </span>
+  )
+}
+
+function humanizeRunStatus(run: OrchestrationRun) {
+  if (run.status === "PLAN_READY") return "Plan is ready and waiting for final orchestration transition."
+  if (run.status === "AWAITING_PLAN_APPROVAL") return `I drafted a ${run.complexity_level.toLowerCase()} plan and paused for your approval.`
+  if (run.status === "PENDING_APPROVAL") return "Waiting for required human approval before execution can continue."
+  if (run.status === "QUEUED") return "Run is queued and will begin shortly."
+  if (run.status === "PLANNING") return "I’m planning the implementation and checking the workspace context."
+  if (run.status === "BREAKING_DOWN") return "I’m converting the plan into executable agent steps."
+  if (run.status === "RUNNING") return `I’m executing the plan${run.current_phase ? `: ${run.current_phase}` : "."}`
+  if (run.status === "VERIFYING") return `I’m verifying the latest changes${run.current_phase ? `: ${run.current_phase}` : "."}`
+  if (run.status === "COMPLETED") return "The run completed successfully."
+  if (run.status === "FAILED") return run.last_error || "The run failed and needs review."
+  if (run.status === "CANCELLED") return "The run was cancelled before completion."
+  return run.current_phase || run.status
+}
+
+function formatEnumLabel(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((segment) => (segment ? `${segment[0].toUpperCase()}${segment.slice(1)}` : segment))
+    .join(" ")
+}
+
+function formatRunStatusLabel(status: OrchestrationRun["status"]) {
+  return formatEnumLabel(status)
+}
+
+function formatActivityKind(kind: string) {
+  return kind.replaceAll(".", " ").replaceAll("_", " ")
+}
+
+function summarizeArtifactTypes(artifacts: OrchestrationArtifact[]) {
+  const counts = artifacts.reduce<Record<string, number>>((accumulator, artifact) => {
+    accumulator[artifact.artifact_type] = (accumulator[artifact.artifact_type] ?? 0) + 1
+    return accumulator
+  }, {})
+  return Object.entries(counts)
+    .slice(0, 5)
+    .map(([type, count]) => `${type.toLowerCase()} × ${count}`)
+    .join(", ")
+}
+
+function humanizeWorkspaceEvent(event: WorkspaceEvent) {
+  if (event.kind === "orchestration_run_updated") return `Run #${event.run_id} moved to ${formatEnumLabel(event.status ?? "updated")} (${event.progress_percent ?? 0}%).`
+  if (event.kind === "task_status_changed") return `Step #${event.sequence_order} @${event.assigned_agent} is ${formatEnumLabel(event.status ?? "updated")}.`
+  if (event.kind === "approval_requested") return `Approval requested for run #${event.run_id}.`
+  if (event.kind === "lock_status_changed") return event.is_locked ? `Workspace locked by ${event.locked_by ?? "unknown"}.` : "Workspace unlocked."
+  if (event.kind === "github_sync_updated") return `GitHub sync ${formatEnumLabel(event.sync_status ?? "updated")}${event.pr_url ? ` · PR ${event.pr_url}` : ""}.`
+  return event.kind.replaceAll("_", " ")
 }
 
 function normalizeSessions(payload: OpenCodeSession[] | Record<string, OpenCodeSession>): OpenCodeSession[] {
