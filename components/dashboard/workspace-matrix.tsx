@@ -14,7 +14,6 @@ export function WorkspaceMatrix() {
   const [approvals, setApprovals] = useState<PendingApprovalItem[]>([])
   const [notifications, setNotifications] = useState<UserNotification[]>([])
   const [unreadNotifications, setUnreadNotifications] = useState(0)
-  const [portByProject, setPortByProject] = useState<Record<number, string>>({})
   const [error, setError] = useState("")
   const [isLoading, setIsLoading] = useState(true)
   const [isProvisioning, setIsProvisioning] = useState(false)
@@ -72,45 +71,6 @@ export function WorkspaceMatrix() {
       setError(createError instanceof Error ? createError.message : "Unable to provision workspace")
     } finally {
       setIsProvisioning(false)
-    }
-  }
-
-  async function startDaemon(project: Project) {
-    const rawPort = portByProject[project.id] || "8010"
-    const port = Number.parseInt(rawPort, 10)
-    if (Number.isNaN(port)) return
-    setError("")
-    try {
-      await api.startDaemon(project.id, port)
-      await loadProjects()
-      pushToast(`Daemon started for ${project.name}.`, "success")
-    } catch (startError) {
-      pushToast("Unable to start daemon. Acquire lock first or check permissions.", "error")
-      setError(startError instanceof Error ? startError.message : "Unable to start daemon")
-    }
-  }
-
-  async function acquireLock(project: Project) {
-    setError("")
-    try {
-      await api.acquireLock(project.id)
-      await loadProjects()
-      pushToast(`Lock acquired for ${project.name}.`, "success")
-    } catch (acquireError) {
-      pushToast("Unable to acquire lock.", "error")
-      setError(acquireError instanceof Error ? acquireError.message : "Unable to acquire lock")
-    }
-  }
-
-  async function releaseLock(project: Project) {
-    setError("")
-    try {
-      await api.releaseLock(project.id)
-      await loadProjects()
-      pushToast(`Lock released for ${project.name}.`, "success")
-    } catch (releaseError) {
-      pushToast("Unable to release lock.", "error")
-      setError(releaseError instanceof Error ? releaseError.message : "Unable to release lock")
     }
   }
 
@@ -211,47 +171,7 @@ export function WorkspaceMatrix() {
       ) : (
         <div className="mt-8 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
           {projects.map((project) => (
-            <div key={project.id} className="space-y-3">
-              <ProjectCard project={project} />
-              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => acquireLock(project)}
-                    className="rounded-lg border border-emerald-300/30 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-300/10"
-                  >
-                    Acquire lock
-                  </button>
-                  <button
-                    onClick={() => releaseLock(project)}
-                    className="rounded-lg border border-slate-300/30 px-3 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-300/10"
-                  >
-                    Release lock
-                  </button>
-                  {project.locked_by_username ? <span className="text-xs text-slate-400">Owner: {project.locked_by_username}</span> : null}
-                </div>
-                {!project.daemon_pid ? (
-                  <div className="mt-3 space-y-2">
-                    <p className="text-xs text-slate-400">Start daemon to enable workspace sessions and open the workspace detail view.</p>
-                    <div className="flex gap-2">
-                      <input
-                        value={portByProject[project.id] ?? "8010"}
-                        onChange={(event) => setPortByProject((current) => ({ ...current, [project.id]: event.target.value }))}
-                        className="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none"
-                        aria-label={`Daemon port for ${project.name}`}
-                      />
-                      <button
-                        onClick={() => startDaemon(project)}
-                        className="rounded-xl border border-cyan-300/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-300/10"
-                      >
-                        Start daemon
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="mt-3 text-xs text-emerald-200">Daemon active on port {project.allocated_port}. Open workspace from card.</p>
-                )}
-              </div>
-            </div>
+            <ProjectCard key={project.id} project={project} />
           ))}
         </div>
       )}

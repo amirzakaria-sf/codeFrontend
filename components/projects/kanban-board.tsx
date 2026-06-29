@@ -2,6 +2,7 @@
 
 import { ChangeEvent, ClipboardEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
+import { useSearchParams } from "next/navigation"
 import { api } from "@/lib/api"
 import { openProjectSocket } from "@/lib/websocket"
 import { useToast } from "@/components/ui/toast-provider"
@@ -34,6 +35,8 @@ const ACCEPTED_REFERENCE_FILE_EXTENSIONS =
 
 export function KanbanBoard({ projectId }: { projectId: number }) {
   const { pushToast } = useToast()
+  const searchParams = useSearchParams()
+  const shouldPrepareOnOpen = searchParams.get("prepare") === "1"
   const [project, setProject] = useState<Project | null>(null)
   const [tasks, setTasks] = useState<TaskQueue[]>([])
   const [runs, setRuns] = useState<OrchestrationRun[]>([])
@@ -63,6 +66,7 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
   const [daemonPortInput, setDaemonPortInput] = useState("8010")
   const [pendingReferences, setPendingReferences] = useState<UploadedReference[]>([])
   const [isUploadingReference, setIsUploadingReference] = useState(false)
+  const [isPreparingWorkspace, setIsPreparingWorkspace] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadSessionDetails = useCallback(
@@ -159,9 +163,29 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
     }
   }, [loadSessionDetails, projectId, selectedSessionId])
 
+  const prepareWorkspaceRuntime = useCallback(async () => {
+    setIsPreparingWorkspace(true)
+    try {
+      const payload = await api.prepareWorkspace(projectId)
+      setProject(payload.project)
+      pushToast("Workspace runtime prepared. You can start building now.", "success")
+    } catch (prepareError) {
+      setError(prepareError instanceof Error ? prepareError.message : "Unable to prepare workspace runtime")
+    } finally {
+      setIsPreparingWorkspace(false)
+    }
+  }, [projectId, pushToast])
+
   useEffect(() => {
-    queueMicrotask(() => {
-      load().catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Unable to load project"))
+    queueMicrotask(async () => {
+      try {
+        if (shouldPrepareOnOpen) {
+          await prepareWorkspaceRuntime()
+        }
+        await load()
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load project")
+      }
     })
     const socket = openProjectSocket(projectId, (event) => {
       setEvents((current) => [event, ...current].slice(0, 20))
@@ -176,7 +200,7 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       }
     })
     return () => socket.close()
-  }, [load, projectId])
+  }, [load, prepareWorkspaceRuntime, projectId, shouldPrepareOnOpen])
 
   const tasksByStatus = useMemo(() => {
     return columns.reduce<Record<TaskStatus, TaskQueue[]>>((accumulator, column) => {
@@ -244,8 +268,9 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       await load()
       pushToast("Daemon started.", "success")
     } catch (startError) {
-      pushToast("Unable to start daemon. Ensure you hold the lock.", "error")
-      setError(startError instanceof Error ? startError.message : "Unable to start daemon")
+      const detail = startError instanceof Error ? startError.message : "Unable to start daemon"
+      pushToast(detail, "error")
+      setError(detail)
     } finally {
       setIsChangingDaemon(false)
     }
@@ -291,32 +316,6 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       setError(rejectionError instanceof Error ? rejectionError.message : "Unable to reject task")
     } finally {
       setRejectingTaskId(null)
-    }
-  }
-
-  async function acquireLock() {
-    if (!project) return
-    setError("")
-    try {
-      await api.acquireLock(project.id)
-      await load()
-      pushToast(`Lock acquired for ${project.name}.`, "success")
-    } catch (acquireError) {
-      pushToast("Unable to acquire lock. It may be held by another user.", "error")
-      setError(acquireError instanceof Error ? acquireError.message : "Unable to acquire lock")
-    }
-  }
-
-  async function releaseLock() {
-    if (!project) return
-    setError("")
-    try {
-      await api.releaseLock(project.id)
-      await load()
-      pushToast(`Lock released for ${project.name}.`, "success")
-    } catch (releaseError) {
-      pushToast("Unable to release lock.", "error")
-      setError(releaseError instanceof Error ? releaseError.message : "Unable to release lock")
     }
   }
 
@@ -443,16 +442,11 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
               {project?.is_locked ? `Locked by ${project.locked_by_username ?? "unknown"}` : "Unlocked"}
             </span>
             <button
-              onClick={acquireLock}
-              className="rounded-full border border-emerald-300/30 px-3 py-1 text-emerald-100 hover:bg-emerald-300/10"
+              onClick={prepareWorkspaceRuntime}
+              disabled={isPreparingWorkspace}
+              className="rounded-full border border-emerald-300/30 px-3 py-1 text-emerald-100 hover:bg-emerald-300/10 disabled:opacity-60"
             >
-              Acquire lock
-            </button>
-            <button
-              onClick={releaseLock}
-              className="rounded-full border border-slate-300/30 px-3 py-1 text-slate-100 hover:bg-slate-300/10"
-            >
-              Release lock
+              {isPreparingWorkspace ? "Preparing…" : "Prepare workspace"}
             </button>
             <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">
               Port: {project?.allocated_port ?? "Not assigned"}
@@ -558,7 +552,7 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-slate-400">
-            Lock-aware execution queues a durable background run that continues through plan → supervisor → worker phases.
+            Runtime preparation auto-locks and starts the daemon as needed, then runs durable background orchestration.
           </p>
           <button
             disabled={isExecuting}

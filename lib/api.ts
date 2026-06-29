@@ -193,6 +193,11 @@ export const api = {
         body: JSON.stringify({ allocated_port }),
       },
     ),
+  prepareWorkspace: (projectId: number) =>
+    request<{ detail: string; project: Project }>(`/projects/${projectId}/prepare-workspace/`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   acquireLock: (projectId: number, force = false) =>
     request<{ detail: string; project: Project }>(`/projects/${projectId}/lock-acquire/`, {
       method: "POST",

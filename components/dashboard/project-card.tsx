@@ -51,14 +51,17 @@ export function ProjectCard({ project }: { project: Project }) {
         </div>
       ) : null}
       <p className="mt-5 text-sm font-medium text-cyan-200 opacity-0 transition group-hover:opacity-100">
-        {workspaceReady ? "Open workspace →" : "Start daemon to open workspace"}
+        {workspaceReady ? "Open workspace →" : "Open & prepare workspace →"}
       </p>
     </>
   )
 
-  if (!workspaceReady) {
-    return <article className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20">{cardContent}</article>
-  }
-
-  return <Link href={`/dashboard/projects/${project.id}`} className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-1 hover:border-cyan-300/40 hover:bg-white/[0.07]">{cardContent}</Link>
+  return (
+    <Link
+      href={`/dashboard/projects/${project.id}?prepare=1`}
+      className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-1 hover:border-cyan-300/40 hover:bg-white/[0.07]"
+    >
+      {cardContent}
+    </Link>
+  )
 }
