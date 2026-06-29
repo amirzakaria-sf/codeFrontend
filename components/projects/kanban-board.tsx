@@ -511,8 +511,12 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
           <div className="mt-3 grid max-w-5xl gap-2 text-xs sm:grid-cols-2">
             <PathPill
               label="VM path"
-              value={project?.host_path ?? "Loading host path…"}
-              helper={project?.storage_mode ? `storage: ${project.storage_mode}` : "Host-visible generated code location"}
+              value={project?.host_path ?? (project ? "Host path unavailable" : "Loading host path…")}
+              helper={
+                project?.host_path
+                  ? `storage: ${project.storage_mode}`
+                  : "Set MANAGED_PROJECTS_HOST_ROOT in backend env to expose host VM path"
+              }
             />
             <PathPill
               label="Runtime path"
