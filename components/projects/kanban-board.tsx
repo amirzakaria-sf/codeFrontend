@@ -37,7 +37,9 @@ const columns: Array<{ status: TaskStatus; label: string; tone: string }> = [
 const ACCEPTED_REFERENCE_FILE_EXTENSIONS =
   ".pdf,.md,.txt,.png,.jpg,.jpeg,.gif,.webp,.svg,.py,.js,.jsx,.ts,.tsx,.json,.yaml,.yml,.html,.css,.scss,.java,.go,.rs,.c,.cpp,.h,.hpp,.sh,.sql,.xml,.toml,.ini"
 
-export function KanbanBoard({ projectId }: { projectId: number }) {
+type ProjectSection = "overview" | "kanban" | "events"
+
+export function KanbanBoard({ projectId, section = "overview" }: { projectId: number; section?: ProjectSection }) {
   const { pushToast } = useToast()
   const searchParams = useSearchParams()
   const shouldPrepareOnOpen = searchParams.get("prepare") === "1"
@@ -77,6 +79,8 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
   const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState("")
   const [isPlanActionLoading, setIsPlanActionLoading] = useState(false)
   const [replanFeedback, setReplanFeedback] = useState("")
+  const [expandedTask, setExpandedTask] = useState<TaskQueue | null>(null)
+  const [isPlanReviewExpanded, setIsPlanReviewExpanded] = useState(true)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadSessionDetails = useCallback(
@@ -235,6 +239,12 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
 
   const latestRun = runs[0] ?? null
   const latestSyncJob = syncJobs[0] ?? null
+  const overviewHref = `/dashboard/projects/${projectId}`
+  const kanbanHref = `/dashboard/projects/${projectId}/kanban`
+  const eventsHref = `/dashboard/projects/${projectId}/events`
+  const showOverview = section === "overview"
+  const showKanban = section === "kanban"
+  const showEvents = section === "events"
   const activeSessionCount = useMemo(
     () => Object.values(sessionStatus).filter((entry) => (entry.type ?? "idle") !== "idle").length,
     [sessionStatus],
@@ -550,7 +560,7 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
             </button>
             <button
               onClick={stopDaemon}
-              disabled={isChangingDaemon || !project?.daemon_pid}
+              disabled={isChangingDaemon || (!project?.daemon_pid && !project?.allocated_port)}
               className="rounded-full border border-red-300/30 px-3 py-1 text-red-100 hover:bg-red-300/10 disabled:opacity-60"
             >
               Stop daemon
@@ -582,6 +592,31 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         </Link>
       </header>
 
+      <nav className="rounded-2xl border border-white/10 bg-white/[0.03] p-2">
+        <div className="grid gap-2 md:grid-cols-3">
+          <Link
+            href={overviewHref}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${showOverview ? "bg-cyan-300 text-slate-950" : "border border-white/10 text-slate-200 hover:bg-white/10"}`}
+          >
+            Project overview
+          </Link>
+          <Link
+            href={kanbanHref}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${showKanban ? "bg-cyan-300 text-slate-950" : "border border-white/10 text-slate-200 hover:bg-white/10"}`}
+          >
+            Kanban
+          </Link>
+          <Link
+            href={eventsHref}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${showEvents ? "bg-cyan-300 text-slate-950" : "border border-white/10 text-slate-200 hover:bg-white/10"}`}
+          >
+            Live events
+          </Link>
+        </div>
+      </nav>
+
+      {showOverview ? (
+      <>
       <form onSubmit={execute} className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
         <label htmlFor="prompt" className="text-sm font-medium text-slate-200">
           Dispatch multi-agent prompt
@@ -658,16 +693,37 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
         events={events}
       />
 
-      <PlanReviewPanel
-        latestRun={latestRun}
-        plan={latestRunPlan}
-        isLoading={isPlanActionLoading}
-        replanFeedback={replanFeedback}
-        onReplanFeedbackChange={setReplanFeedback}
-        onApprove={approveLatestPlan}
-        onReplan={requestLatestReplan}
-        onUpdateStep={updatePlanStep}
-      />
+      {latestRunPlan?.steps?.length ? (
+        <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
+          <button
+            type="button"
+            onClick={() => setIsPlanReviewExpanded((current) => !current)}
+            className="flex w-full items-center justify-between gap-3 text-left"
+          >
+            <div>
+              <p className="text-sm font-medium text-amber-200">Plan review</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Generated execution plan</h2>
+            </div>
+            <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-xs text-slate-300">
+              {isPlanReviewExpanded ? "Collapse" : "Expand"}
+            </span>
+          </button>
+          {isPlanReviewExpanded ? (
+            <div className="mt-4">
+              <PlanReviewPanel
+                latestRun={latestRun}
+                plan={latestRunPlan}
+                isLoading={isPlanActionLoading}
+                replanFeedback={replanFeedback}
+                onReplanFeedbackChange={setReplanFeedback}
+                onApprove={approveLatestPlan}
+                onReplan={requestLatestReplan}
+                onUpdateStep={updatePlanStep}
+              />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -870,38 +926,50 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
       </section>
 
       {error ? <div className="rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
+      </>
+      ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-6">
-        {columns.map((column) => (
-          <section key={column.status} className="min-h-60 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
-            <div className={`mb-4 rounded-full border px-3 py-1 text-xs font-semibold ${column.tone}`}>{column.label}</div>
-            <div className="space-y-3">
-              {tasksByStatus[column.status]?.length ? (
-                tasksByStatus[column.status].map((task) => (
-                  <TaskCard key={task.id} task={task} onApprove={approveTask} onReject={setRejectingTask} />
-                ))
-              ) : (
-                <p className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-500">No tasks</p>
-              )}
-            </div>
-          </section>
-        ))}
-      </div>
-
-      <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
-        <h2 className="font-semibold text-white">Live events</h2>
-        <div className="mt-3 space-y-2">
-          {events.length ? (
-            events.map((event, index) => (
-              <pre key={`${event.kind}-${index}`} className="overflow-auto rounded-xl bg-slate-950/80 p-3 text-xs text-slate-300">
-                {JSON.stringify(event, null, 2)}
-              </pre>
-            ))
-          ) : (
-            <p className="text-sm text-slate-500">No websocket events yet.</p>
-          )}
+      {showKanban ? (
+        <div className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {columns.map((column) => (
+              <section key={column.status} className="min-h-52 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={`mb-4 rounded-full border px-3 py-1 text-xs font-semibold ${column.tone}`}>{column.label}</div>
+                <div className="space-y-2">
+                  {tasksByStatus[column.status]?.length ? (
+                    tasksByStatus[column.status].map((task) => (
+                      <TaskCard key={task.id} task={task} onApprove={approveTask} onReject={setRejectingTask} onExpand={setExpandedTask} />
+                    ))
+                  ) : (
+                    <p className="rounded-2xl border border-dashed border-white/10 p-3 text-xs text-slate-500">No tasks</p>
+                  )}
+                </div>
+              </section>
+            ))}
+          </div>
+          {error ? <div className="rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
         </div>
-      </section>
+      ) : null}
+
+      {showEvents ? (
+        <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+          <h2 className="font-semibold text-white">Live events</h2>
+          <div className="mt-3 space-y-2">
+            {events.length ? (
+              events.map((event, index) => (
+                <pre key={`${event.kind}-${index}`} className="overflow-auto rounded-xl bg-slate-950/80 p-3 text-xs text-slate-300">
+                  {JSON.stringify(event, null, 2)}
+                </pre>
+              ))
+            ) : (
+              <p className="text-sm text-slate-500">No websocket events yet.</p>
+            )}
+          </div>
+          {error ? <div className="mt-3 rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
+        </section>
+      ) : null}
+
+      <TaskDetailsModal task={expandedTask} onClose={() => setExpandedTask(null)} onApprove={approveTask} onReject={setRejectingTask} />
       <RejectionModal
         isOpen={Boolean(rejectingTask)}
         title={rejectingTask ? `Reject task #${rejectingTask.id}` : "Reject task"}
@@ -1237,36 +1305,108 @@ function TaskCard({
   task,
   onApprove,
   onReject,
+  onExpand,
 }: {
   task: TaskQueue
   onApprove: (taskId: number) => void
   onReject: (task: TaskQueue) => void
+  onExpand: (task: TaskQueue) => void
 }) {
   return (
-    <article className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+    <article className="rounded-2xl border border-white/10 bg-slate-950/70 p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="rounded-full bg-white/10 px-2 py-1 text-xs text-slate-300">#{task.sequence_order}</span>
-        <span className="text-xs font-medium text-cyan-200">@{task.assigned_agent}</span>
+        <span className="rounded-full bg-white/10 px-2 py-1 text-[11px] text-slate-300">#{task.sequence_order}</span>
+        <span className="text-[11px] font-medium text-cyan-200">@{task.assigned_agent}</span>
       </div>
-      <p className="mt-3 line-clamp-5 text-sm leading-6 text-slate-300">{task.instruction_payload}</p>
-      {task.supervisor_feedback ? <p className="mt-3 rounded-xl bg-white/[0.05] p-3 text-xs text-slate-400">{task.supervisor_feedback}</p> : null}
+      <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-300">{task.instruction_payload}</p>
+      {task.supervisor_feedback ? <p className="mt-2 line-clamp-2 rounded-xl bg-white/[0.05] p-2 text-[11px] text-slate-400">{task.supervisor_feedback}</p> : null}
+      <button
+        onClick={() => onExpand(task)}
+        className="mt-2 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-slate-200 hover:bg-white/10"
+      >
+        View details
+      </button>
       {task.status === "PENDING_APPROVAL" ? (
-        <div className="mt-3 flex gap-2">
+        <div className="mt-2 flex gap-2">
           <button
             onClick={() => onApprove(task.id)}
-            className="rounded-lg border border-emerald-300/30 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-300/10"
+            className="rounded-lg border border-emerald-300/30 px-2 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-300/10"
           >
             Approve
           </button>
           <button
             onClick={() => onReject(task)}
-            className="rounded-lg border border-red-300/30 px-3 py-1.5 text-xs font-medium text-red-100 hover:bg-red-300/10"
+            className="rounded-lg border border-red-300/30 px-2 py-1 text-[11px] font-medium text-red-100 hover:bg-red-300/10"
           >
             Reject
           </button>
         </div>
       ) : null}
     </article>
+  )
+}
+
+function TaskDetailsModal({
+  task,
+  onClose,
+  onApprove,
+  onReject,
+}: {
+  task: TaskQueue | null
+  onClose: () => void
+  onApprove: (taskId: number) => void
+  onReject: (task: TaskQueue) => void
+}) {
+  if (!task) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" role="dialog" aria-modal="true" aria-label={`Task ${task.sequence_order} details`}>
+      <div className="w-full max-w-2xl rounded-2xl border border-white/15 bg-slate-900 p-4 shadow-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-400">Step #{task.sequence_order}</p>
+            <h3 className="mt-1 text-lg font-semibold text-white">@{task.assigned_agent}</h3>
+          </div>
+          <button onClick={onClose} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-200 hover:bg-white/10">
+            Close
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-3 text-sm">
+          <section className="rounded-xl border border-white/10 bg-slate-950/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Instruction</p>
+            <p className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-slate-200">{task.instruction_payload}</p>
+          </section>
+          <section className="rounded-xl border border-white/10 bg-slate-950/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Supervisor feedback</p>
+            <p className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-slate-300">{task.supervisor_feedback || "No feedback"}</p>
+          </section>
+        </div>
+
+        {task.status === "PENDING_APPROVAL" ? (
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              onClick={() => {
+                onApprove(task.id)
+                onClose()
+              }}
+              className="rounded-lg border border-emerald-300/30 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-300/10"
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => {
+                onReject(task)
+                onClose()
+              }}
+              className="rounded-lg border border-red-300/30 px-3 py-1.5 text-xs font-medium text-red-100 hover:bg-red-300/10"
+            >
+              Reject
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
   )
 }
 
