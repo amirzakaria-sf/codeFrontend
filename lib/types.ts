@@ -248,6 +248,14 @@ export type ExecuteResponse = {
   progress_percent?: number
 }
 
+export type UploadedReference = {
+  filename: string
+  relative_path: string
+  absolute_path: string
+  size_bytes: number
+  content_type: string
+}
+
 export type OpenCodeSession = {
   id: string
   title?: string

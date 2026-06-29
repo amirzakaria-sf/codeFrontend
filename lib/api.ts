@@ -16,6 +16,7 @@ import type {
   ProvisionProjectPayload,
   TaskQueue,
   TokenUsageEvent,
+  UploadedReference,
   User,
 } from "./types"
 
@@ -120,6 +121,49 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return response.json() as Promise<T>
 }
 
+async function requestFormData<T>(path: string, formData: FormData, options: RequestOptions = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  if (options.authenticated !== false) {
+    const token = getAccessToken()
+    if (token) headers.set("Authorization", `Bearer ${token}`)
+  }
+
+  let response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    method: options.method ?? "POST",
+    body: formData,
+    headers,
+  })
+
+  if (response.status === 401 && options.authenticated !== false && options.retryOn401 !== false) {
+    const refreshedToken = await refreshAccessToken()
+    if (refreshedToken) {
+      const retryHeaders = new Headers(options.headers)
+      retryHeaders.set("Authorization", `Bearer ${refreshedToken}`)
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        method: options.method ?? "POST",
+        body: formData,
+        headers: retryHeaders,
+      })
+    }
+  }
+
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`
+    try {
+      const payload = await response.json()
+      message = payload.detail ?? JSON.stringify(payload)
+    } catch {
+      // Keep fallback message.
+    }
+    throw new ApiError(message, response.status)
+  }
+
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<LoginResponse>("/auth/token/", {
@@ -181,6 +225,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ prompt }),
     }),
+  uploadReference: (projectId: number, file: File) => {
+    const payload = new FormData()
+    payload.append("file", file, file.name)
+    return requestFormData<UploadedReference>(`/projects/${projectId}/references/upload/`, payload, {
+      method: "POST",
+    })
+  },
   runs: (projectId: number) => request<OrchestrationRun[]>(`/projects/${projectId}/runs/`),
   run: (projectId: number, runId: number) => request<OrchestrationRun>(`/projects/${projectId}/runs/${runId}/`),
   usageSummary: (projectId: number) => request<ProjectUsageSummary>(`/projects/${projectId}/usage-summary/`),

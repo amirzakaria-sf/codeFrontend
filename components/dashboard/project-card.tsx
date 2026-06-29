@@ -4,12 +4,10 @@ import { projectModeLabel } from "./project-provisioner"
 
 export function ProjectCard({ project }: { project: Project }) {
   const primaryTarget = project.targets.find((target) => target.is_primary) ?? project.targets[0]
+  const workspaceReady = Boolean(project.allocated_port && project.daemon_pid)
 
-  return (
-    <Link
-      href={`/dashboard/projects/${project.id}`}
-      className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-1 hover:border-cyan-300/40 hover:bg-white/[0.07]"
-    >
+  const cardContent = (
+    <>
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">{project.name}</h2>
@@ -53,8 +51,14 @@ export function ProjectCard({ project }: { project: Project }) {
         </div>
       ) : null}
       <p className="mt-5 text-sm font-medium text-cyan-200 opacity-0 transition group-hover:opacity-100">
-        Open workspace →
+        {workspaceReady ? "Open workspace →" : "Start daemon to open workspace"}
       </p>
-    </Link>
+    </>
   )
+
+  if (!workspaceReady) {
+    return <article className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20">{cardContent}</article>
+  }
+
+  return <Link href={`/dashboard/projects/${project.id}`} className="group rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-1 hover:border-cyan-300/40 hover:bg-white/[0.07]">{cardContent}</Link>
 }

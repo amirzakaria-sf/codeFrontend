@@ -195,7 +195,9 @@ export function WorkspaceMatrix() {
               </article>
             ))
           ) : (
-            <p className="rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">No notifications yet.</p>
+            <p className="rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-500">
+              No notifications yet.
+            </p>
           )}
         </div>
       </section>
@@ -211,36 +213,44 @@ export function WorkspaceMatrix() {
           {projects.map((project) => (
             <div key={project.id} className="space-y-3">
               <ProjectCard project={project} />
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => acquireLock(project)}
-                  className="rounded-lg border border-emerald-300/30 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-300/10"
-                >
-                  Acquire lock
-                </button>
-                <button
-                  onClick={() => releaseLock(project)}
-                  className="rounded-lg border border-slate-300/30 px-3 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-300/10"
-                >
-                  Release lock
-                </button>
-                {project.locked_by_username ? <span className="text-xs text-slate-400">Owner: {project.locked_by_username}</span> : null}
-              </div>
-              {!project.daemon_pid ? (
-                <div className="flex gap-2">
-                  <input
-                    value={portByProject[project.id] ?? "8010"}
-                    onChange={(event) => setPortByProject((current) => ({ ...current, [project.id]: event.target.value }))}
-                    className="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none"
-                  />
+              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => startDaemon(project)}
-                    className="rounded-xl border border-cyan-300/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-300/10"
+                    onClick={() => acquireLock(project)}
+                    className="rounded-lg border border-emerald-300/30 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-300/10"
                   >
-                    Start daemon
+                    Acquire lock
                   </button>
+                  <button
+                    onClick={() => releaseLock(project)}
+                    className="rounded-lg border border-slate-300/30 px-3 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-300/10"
+                  >
+                    Release lock
+                  </button>
+                  {project.locked_by_username ? <span className="text-xs text-slate-400">Owner: {project.locked_by_username}</span> : null}
                 </div>
-              ) : null}
+                {!project.daemon_pid ? (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs text-slate-400">Start daemon to enable workspace sessions and open the workspace detail view.</p>
+                    <div className="flex gap-2">
+                      <input
+                        value={portByProject[project.id] ?? "8010"}
+                        onChange={(event) => setPortByProject((current) => ({ ...current, [project.id]: event.target.value }))}
+                        className="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none"
+                        aria-label={`Daemon port for ${project.name}`}
+                      />
+                      <button
+                        onClick={() => startDaemon(project)}
+                        className="rounded-xl border border-cyan-300/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-300/10"
+                      >
+                        Start daemon
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-emerald-200">Daemon active on port {project.allocated_port}. Open workspace from card.</p>
+                )}
+              </div>
             </div>
           ))}
         </div>

@@ -1,6 +1,6 @@
 "use client"
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
+import { ChangeEvent, ClipboardEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { api } from "@/lib/api"
 import { openProjectSocket } from "@/lib/websocket"
@@ -16,6 +16,7 @@ import type {
   TaskQueue,
   TaskStatus,
   TokenUsageEvent,
+  UploadedReference,
   WorkspaceEvent,
 } from "@/lib/types"
 
@@ -27,6 +28,9 @@ const columns: Array<{ status: TaskStatus; label: string; tone: string }> = [
   { status: "COMPLETED", label: "Completed", tone: "border-emerald-300/30 text-emerald-200" },
   { status: "FAILED", label: "Failed", tone: "border-red-300/30 text-red-200" },
 ]
+
+const ACCEPTED_REFERENCE_FILE_EXTENSIONS =
+  ".pdf,.md,.txt,.png,.jpg,.jpeg,.gif,.webp,.svg,.py,.js,.jsx,.ts,.tsx,.json,.yaml,.yml,.html,.css,.scss,.java,.go,.rs,.c,.cpp,.h,.hpp,.sh,.sql,.xml,.toml,.ini"
 
 export function KanbanBoard({ projectId }: { projectId: number }) {
   const { pushToast } = useToast()
@@ -56,6 +60,10 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
   const [syncJobs, setSyncJobs] = useState<GitSyncJob[]>([])
   const [usageSummary, setUsageSummary] = useState<ProjectUsageSummary | null>(null)
   const [latestRunUsageEvents, setLatestRunUsageEvents] = useState<TokenUsageEvent[]>([])
+  const [daemonPortInput, setDaemonPortInput] = useState("8010")
+  const [pendingReferences, setPendingReferences] = useState<UploadedReference[]>([])
+  const [isUploadingReference, setIsUploadingReference] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadSessionDetails = useCallback(
     async (sessionId: string) => {
@@ -83,22 +91,61 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
   )
 
   const load = useCallback(async () => {
-    const [projectPayload, taskPayload, runPayload, sessionsPayload, sessionStatusPayload] = await Promise.all([
+    const [projectPayload, taskPayload, runPayload] = await Promise.all([
       api.project(projectId),
       api.tasks(projectId),
       api.runs(projectId),
-      api.sessions(projectId),
-      api.sessionsStatus(projectId),
     ])
     const [syncJobsPayload, usageSummaryPayload] = await Promise.all([api.syncJobs(projectId), api.usageSummary(projectId)])
-    const normalizedSessions = normalizeSessions(sessionsPayload)
     setProject(projectPayload)
     setTasks(taskPayload)
     setRuns(runPayload)
-    setSessions(normalizedSessions)
-    setSessionStatus(sessionStatusPayload)
     setSyncJobs(syncJobsPayload)
     setUsageSummary(usageSummaryPayload)
+    setDaemonPortInput(String(projectPayload.allocated_port ?? 8010))
+
+    if (!projectPayload.allocated_port) {
+      setSessions([])
+      setSessionStatus({})
+      setSelectedSessionId("")
+      setSelectedSession(null)
+      setSessionMessages([])
+      setSessionDiff([])
+      setSessionTodos([])
+      setSessionError("Start daemon to enable OpenCode sessions for this workspace.")
+      return
+    }
+
+    try {
+      const [sessionsPayload, sessionStatusPayload] = await Promise.all([api.sessions(projectId), api.sessionsStatus(projectId)])
+      const normalizedSessions = normalizeSessions(sessionsPayload)
+      setSessions(normalizedSessions)
+      setSessionStatus(sessionStatusPayload)
+
+      const nextSessionId = normalizedSessions.some((session) => session.id === selectedSessionId)
+        ? selectedSessionId
+        : (normalizedSessions[0]?.id ?? "")
+      setSelectedSessionId(nextSessionId)
+
+      if (!nextSessionId) {
+        setSelectedSession(null)
+        setSessionMessages([])
+        setSessionDiff([])
+        setSessionTodos([])
+      } else {
+        await loadSessionDetails(nextSessionId)
+      }
+      setSessionError("")
+    } catch (sessionLoadError) {
+      setSessions([])
+      setSessionStatus({})
+      setSelectedSessionId("")
+      setSelectedSession(null)
+      setSessionMessages([])
+      setSessionDiff([])
+      setSessionTodos([])
+      setSessionError(sessionLoadError instanceof Error ? sessionLoadError.message : "Unable to load OpenCode sessions")
+    }
 
     if (runPayload[0]?.id) {
       try {
@@ -110,21 +157,6 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
     } else {
       setLatestRunUsageEvents([])
     }
-
-    const nextSessionId = normalizedSessions.some((session) => session.id === selectedSessionId)
-      ? selectedSessionId
-      : (normalizedSessions[0]?.id ?? "")
-    setSelectedSessionId(nextSessionId)
-
-    if (!nextSessionId) {
-      setSelectedSession(null)
-      setSessionMessages([])
-      setSessionDiff([])
-      setSessionTodos([])
-      return
-    }
-
-    await loadSessionDetails(nextSessionId)
   }, [loadSessionDetails, projectId, selectedSessionId])
 
   useEffect(() => {
@@ -166,8 +198,12 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
     setError("")
     setIsExecuting(true)
     try {
-      const response = await api.executePrompt(projectId, prompt)
+      const referenceContext = pendingReferences.length
+        ? `\n\nReference files available in doc-references/ for this run:\n${pendingReferences.map((reference) => `- ${reference.relative_path}`).join("\n")}`
+        : ""
+      const response = await api.executePrompt(projectId, `${prompt}${referenceContext}`)
       setPrompt("")
+      setPendingReferences([])
       await load()
       if (response.mode === "queued") pushToast(`Run #${response.run_id} queued in background.`, "success")
       if (response.mode === "queued_for_approval") pushToast(`Run #${response.run_id} is waiting for approval.`, "info")
@@ -188,6 +224,28 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
     } catch (stopError) {
       pushToast("Unable to stop daemon.", "error")
       setError(stopError instanceof Error ? stopError.message : "Unable to stop daemon")
+    } finally {
+      setIsChangingDaemon(false)
+    }
+  }
+
+  async function startDaemon() {
+    if (!project) return
+    const parsedPort = Number.parseInt(daemonPortInput, 10)
+    if (Number.isNaN(parsedPort) || parsedPort <= 0) {
+      setError("Provide a valid daemon port.")
+      return
+    }
+
+    setError("")
+    setIsChangingDaemon(true)
+    try {
+      await api.startDaemon(project.id, parsedPort)
+      await load()
+      pushToast("Daemon started.", "success")
+    } catch (startError) {
+      pushToast("Unable to start daemon. Ensure you hold the lock.", "error")
+      setError(startError instanceof Error ? startError.message : "Unable to start daemon")
     } finally {
       setIsChangingDaemon(false)
     }
@@ -332,6 +390,45 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
     await loadSessionDetails(sessionId)
   }
 
+  async function uploadReferenceFiles(files: File[]) {
+    if (!project || !files.length) return
+    setIsUploadingReference(true)
+    setError("")
+    try {
+      const uploaded = await Promise.all(files.map((file) => api.uploadReference(project.id, file)))
+      setPendingReferences((current) => [...uploaded, ...current])
+      pushToast(`Uploaded ${uploaded.length} reference file${uploaded.length === 1 ? "" : "s"}.`, "success")
+    } catch (uploadError) {
+      pushToast("Unable to upload reference file(s). Acquire lock first and retry.", "error")
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to upload reference files")
+    } finally {
+      setIsUploadingReference(false)
+    }
+  }
+
+  async function handleReferenceFileSelection(event: ChangeEvent<HTMLInputElement>) {
+    const target = event.currentTarget
+    const fileList = target.files
+    if (!fileList || fileList.length === 0) return
+    await uploadReferenceFiles(Array.from(fileList))
+    target.value = ""
+  }
+
+  async function handlePromptPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const imageFiles: File[] = []
+    for (const item of Array.from(event.clipboardData.items)) {
+      if (!item.type.startsWith("image/")) continue
+      const blob = item.getAsFile()
+      if (!blob) continue
+      const extension = blob.type.split("/")[1] || "png"
+      imageFiles.push(new File([blob], `clipboard-${Date.now()}.${extension}`, { type: blob.type }))
+    }
+
+    if (!imageFiles.length) return
+    event.preventDefault()
+    await uploadReferenceFiles(imageFiles)
+  }
+
   return (
     <div className="space-y-8">
       <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -377,6 +474,23 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
             >
               Stop daemon
             </button>
+            {!project?.daemon_pid ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={daemonPortInput}
+                  onChange={(event) => setDaemonPortInput(event.target.value)}
+                  className="w-28 rounded-full border border-white/10 bg-slate-950/70 px-3 py-1 text-xs text-white outline-none"
+                  aria-label="Daemon port"
+                />
+                <button
+                  onClick={startDaemon}
+                  disabled={isChangingDaemon}
+                  className="rounded-full border border-cyan-300/30 px-3 py-1 text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
+                >
+                  Start daemon
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
         <Link
@@ -395,10 +509,53 @@ export function KanbanBoard({ projectId }: { projectId: number }) {
           id="prompt"
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
+          onPaste={handlePromptPaste}
           rows={4}
           placeholder="Describe what Foundry-AI should build or modify…"
           className="mt-3 w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none ring-cyan-300/30 focus:border-cyan-300 focus:ring-4"
         />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={ACCEPTED_REFERENCE_FILE_EXTENSIONS}
+          onChange={handleReferenceFileSelection}
+          className="hidden"
+        />
+        <div className="mt-3 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-400">
+              Upload references (.pdf, .md, .txt, images, code files). Files are saved to <span className="font-mono text-slate-300">doc-references/</span>.
+            </p>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploadingReference}
+              className="rounded-lg border border-violet-300/30 px-3 py-1.5 text-xs font-medium text-violet-100 hover:bg-violet-300/10 disabled:opacity-60"
+            >
+              {isUploadingReference ? "Uploading…" : "Upload files"}
+            </button>
+          </div>
+          {pendingReferences.length ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {pendingReferences.map((reference) => (
+                <span key={`${reference.relative_path}-${reference.size_bytes}`} className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-200">
+                  <span className="font-mono">{reference.relative_path}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPendingReferences((current) => current.filter((item) => item.relative_path !== reference.relative_path))}
+                    className="text-slate-400 hover:text-red-200"
+                    aria-label={`Remove ${reference.filename}`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">You can also paste an image directly from clipboard into the prompt box.</p>
+          )}
+        </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-slate-400">
             Lock-aware execution queues a durable background run that continues through plan → supervisor → worker phases.
