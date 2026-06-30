@@ -24,6 +24,7 @@ export type StarterTemplate =
   | "DESKTOP_BACKEND"
 
 export type ProjectSetupStatus = "READY" | "DRAFT"
+export type DaemonDesiredState = "RUNNING" | "STOPPED"
 
 export type WorkspaceTargetRole =
   | "FRONTEND"
@@ -68,7 +69,11 @@ export type Project = {
   setup_status: ProjectSetupStatus
   bootstrap_enabled: boolean
   allocated_port: number | null
+  daemon_desired_state: DaemonDesiredState
+  daemon_last_heartbeat_at: string | null
+  daemon_stop_requested_at: string | null
   is_locked: boolean
+  lock_acquired_at: string | null
   locked_by: number | null
   locked_by_username?: string | null
   daemon_pid: number | null
@@ -137,6 +142,14 @@ export type OrchestrationRunStatus =
 
 export type OrchestrationApprovalScope = "NONE" | "LOCK" | "PLAN"
 export type OrchestrationComplexityLevel = "SIMPLE" | "COMPLEX"
+export type OrchestrationCancellationReason =
+  | ""
+  | "MANUAL_DAEMON_STOP"
+  | "DAEMON_STOPPED"
+  | "DAEMON_CRASHED"
+  | "DAEMON_RESTART_FAILED"
+  | "WORKER_CRASHED"
+  | "RECOVERY_EXHAUSTED"
 
 export type OrchestrationPlanStepStatus = "DRAFT" | "APPROVED" | "REPLACED"
 
@@ -188,6 +201,7 @@ export type OrchestrationRun = {
   supervisor_session_id: string
   active_session_id: string
   blueprint: string
+  cancellation_reason: OrchestrationCancellationReason
   last_error: string
   prompt_tokens: number
   completion_tokens: number
@@ -256,6 +270,12 @@ export type WorkspaceEvent = {
     | "task_status_changed"
     | "approval_requested"
     | "daemon_recovered"
+    | "daemon_restart_failed"
+    | "daemon_stop_requested"
+    | "daemon_stopped"
+    | "daemon_stop_failed"
+    | "run_cancelled_by_daemon_stop"
+    | "lock_expired"
     | "orchestration_run_updated"
     | "github_sync_updated"
     | "notification_created"
@@ -269,6 +289,7 @@ export type WorkspaceEvent = {
   completed_steps?: number
   failed_steps?: number
   last_error?: string
+  cancellation_reason?: OrchestrationCancellationReason
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
@@ -293,6 +314,28 @@ export type WorkspaceEvent = {
   notification_kind?: string
   title?: string
   message?: string
+  error?: string
+  reason?: string
+}
+
+export type DaemonStatus = {
+  project_id: number
+  daemon_pid: number | null
+  allocated_port: number | null
+  daemon_desired_state: DaemonDesiredState
+  daemon_last_heartbeat_at: string | null
+  daemon_stop_requested_at: string | null
+  running: boolean
+  pid_alive: boolean
+  port_reachable: boolean
+  health: {
+    reachable: boolean
+    healthy: boolean
+    busy: boolean
+    state: "healthy" | "busy" | "unhealthy" | "unreachable" | string
+    version?: string
+  }
+  config?: Record<string, unknown>
 }
 
 export type PendingApprovalItem = {

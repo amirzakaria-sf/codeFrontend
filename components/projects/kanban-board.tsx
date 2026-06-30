@@ -8,6 +8,7 @@ import { openProjectSocket } from "@/lib/websocket"
 import { useToast } from "@/components/ui/toast-provider"
 import { RejectionModal } from "@/components/ui/rejection-modal"
 import type {
+  DaemonStatus,
   GitSyncJob,
   OpenCodeSession,
   OpenCodeSessionStatusMap,
@@ -37,6 +38,17 @@ const columns: Array<{ status: TaskStatus; label: string; tone: string }> = [
 const ACCEPTED_REFERENCE_FILE_EXTENSIONS =
   ".pdf,.md,.txt,.png,.jpg,.jpeg,.gif,.webp,.svg,.py,.js,.jsx,.ts,.tsx,.json,.yaml,.yml,.html,.css,.scss,.java,.go,.rs,.c,.cpp,.h,.hpp,.sh,.sql,.xml,.toml,.ini"
 
+const ACTIVE_RUN_STATUSES = new Set<OrchestrationRun["status"]>([
+  "PENDING_APPROVAL",
+  "QUEUED",
+  "PLANNING",
+  "BREAKING_DOWN",
+  "PLAN_READY",
+  "AWAITING_PLAN_APPROVAL",
+  "RUNNING",
+  "VERIFYING",
+])
+
 type ProjectSection = "overview" | "kanban" | "events"
 
 export function KanbanBoard({ projectId, section = "overview" }: { projectId: number; section?: ProjectSection }) {
@@ -51,6 +63,9 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
   const [error, setError] = useState("")
   const [isExecuting, setIsExecuting] = useState(false)
   const [isChangingDaemon, setIsChangingDaemon] = useState(false)
+  const [daemonStatus, setDaemonStatus] = useState<DaemonStatus | null>(null)
+  const [daemonStatusError, setDaemonStatusError] = useState("")
+  const [isStopConfirmOpen, setIsStopConfirmOpen] = useState(false)
   const [rejectingTask, setRejectingTask] = useState<TaskQueue | null>(null)
   const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null)
   const [sessions, setSessions] = useState<OpenCodeSession[]>([])
@@ -122,39 +137,17 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
     setUsageSummary(usageSummaryPayload)
     setDaemonPortInput(String(projectPayload.allocated_port ?? 8010))
 
-    if (!projectPayload.allocated_port) {
-      setSessions([])
-      setSessionStatus({})
-      setSelectedSessionId("")
-      setSelectedSession(null)
-      setSessionMessages([])
-      setSessionDiff([])
-      setSessionTodos([])
-      setSessionError("Start daemon to enable OpenCode sessions for this workspace.")
-      return
+    let daemonStatusPayload: DaemonStatus | null = null
+    try {
+      daemonStatusPayload = await api.daemonStatus(projectId)
+      setDaemonStatus(daemonStatusPayload)
+      setDaemonStatusError("")
+    } catch (daemonLoadError) {
+      setDaemonStatus(null)
+      setDaemonStatusError(daemonLoadError instanceof Error ? daemonLoadError.message : "Unable to load daemon status")
     }
 
-    try {
-      const [sessionsPayload, sessionStatusPayload] = await Promise.all([api.sessions(projectId), api.sessionsStatus(projectId)])
-      const normalizedSessions = normalizeSessions(sessionsPayload)
-      setSessions(normalizedSessions)
-      setSessionStatus(sessionStatusPayload)
-
-      const nextSessionId = normalizedSessions.some((session) => session.id === selectedSessionId)
-        ? selectedSessionId
-        : (normalizedSessions[0]?.id ?? "")
-      setSelectedSessionId(nextSessionId)
-
-      if (!nextSessionId) {
-        setSelectedSession(null)
-        setSessionMessages([])
-        setSessionDiff([])
-        setSessionTodos([])
-      } else {
-        await loadSessionDetails(nextSessionId)
-      }
-      setSessionError("")
-    } catch (sessionLoadError) {
+    const clearSessionState = (message: string) => {
       setSessions([])
       setSessionStatus({})
       setSelectedSessionId("")
@@ -162,7 +155,37 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
       setSessionMessages([])
       setSessionDiff([])
       setSessionTodos([])
-      setSessionError(sessionLoadError instanceof Error ? sessionLoadError.message : "Unable to load OpenCode sessions")
+      setSessionError(message)
+    }
+
+    if (!projectPayload.allocated_port) {
+      clearSessionState("Start daemon to enable OpenCode sessions for this workspace.")
+    } else if (!daemonStatusPayload?.running || !daemonStatusPayload.health.reachable) {
+      clearSessionState("OpenCode daemon is not reachable; sessions are unavailable until runtime is healthy.")
+    } else {
+      try {
+        const [sessionsPayload, sessionStatusPayload] = await Promise.all([api.sessions(projectId), api.sessionsStatus(projectId)])
+        const normalizedSessions = normalizeSessions(sessionsPayload)
+        setSessions(normalizedSessions)
+        setSessionStatus(sessionStatusPayload)
+
+        const nextSessionId = normalizedSessions.some((session) => session.id === selectedSessionId)
+          ? selectedSessionId
+          : (normalizedSessions[0]?.id ?? "")
+        setSelectedSessionId(nextSessionId)
+
+        if (!nextSessionId) {
+          setSelectedSession(null)
+          setSessionMessages([])
+          setSessionDiff([])
+          setSessionTodos([])
+        } else {
+          await loadSessionDetails(nextSessionId)
+        }
+        setSessionError("")
+      } catch (sessionLoadError) {
+        clearSessionState(sessionLoadError instanceof Error ? sessionLoadError.message : "Unable to load OpenCode sessions")
+      }
     }
 
     if (runPayload[0]?.id) {
@@ -222,6 +245,12 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
         event.kind === "approval_requested" ||
         event.kind === "lock_status_changed" ||
         event.kind === "daemon_recovered" ||
+        event.kind === "daemon_restart_failed" ||
+        event.kind === "daemon_stop_requested" ||
+        event.kind === "daemon_stopped" ||
+        event.kind === "daemon_stop_failed" ||
+        event.kind === "run_cancelled_by_daemon_stop" ||
+        event.kind === "lock_expired" ||
         event.kind === "orchestration_run_updated"
       ) {
         load().catch(() => undefined)
@@ -239,6 +268,20 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
 
   const latestRun = runs[0] ?? null
   const latestSyncJob = syncJobs[0] ?? null
+  const activeRuns = useMemo(() => runs.filter((run) => ACTIVE_RUN_STATUSES.has(run.status)), [runs])
+  const latestDaemonEvent = useMemo(
+    () => events.find((event) => event.kind.startsWith("daemon_") || event.kind === "run_cancelled_by_daemon_stop"),
+    [events],
+  )
+  const latestRecoveryActivity = useMemo(
+    () => latestRunActivities.find((activity) => activity.kind.startsWith("recovery.") || activity.kind.includes("restart_failed")),
+    [latestRunActivities],
+  )
+  const daemonView = useMemo(() => deriveDaemonView(project, daemonStatus, isChangingDaemon, latestDaemonEvent), [project, daemonStatus, isChangingDaemon, latestDaemonEvent])
+  const canStartDaemon = Boolean(project && !isChangingDaemon && !daemonView.running && daemonView.desiredState !== "RUNNING")
+  const canRestartDaemon = Boolean(project && !isChangingDaemon && daemonView.hasPort && daemonView.desiredState !== "STOPPED")
+  const canStopDaemon = Boolean(project && !isChangingDaemon && daemonView.hasPort && daemonView.desiredState !== "STOPPED")
+  const canExecutePrompt = Boolean(!isExecuting && prompt.trim() && daemonView.desiredState !== "STOPPED")
   const overviewHref = `/dashboard/projects/${projectId}`
   const kanbanHref = `/dashboard/projects/${projectId}/kanban`
   const eventsHref = `/dashboard/projects/${projectId}/events`
@@ -326,6 +369,7 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
     try {
       await api.stopDaemon(projectId)
       await load()
+      setIsStopConfirmOpen(false)
       pushToast("Daemon stopped.", "success")
     } catch (stopError) {
       pushToast("Unable to stop daemon.", "error")
@@ -538,6 +582,11 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
             <span className={`rounded-full border px-3 py-1 ${project?.is_locked ? "border-amber-300/30 bg-amber-300/10 text-amber-100" : "border-emerald-300/30 bg-emerald-300/10 text-emerald-100"}`}>
               {project?.is_locked ? `Locked by ${project.locked_by_username ?? "unknown"}` : "Unlocked"}
             </span>
+            {project?.lock_acquired_at ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">
+                Lock since {formatDateTime(project.lock_acquired_at)}
+              </span>
+            ) : null}
             <button
               onClick={prepareWorkspaceRuntime}
               disabled={isPreparingWorkspace}
@@ -546,26 +595,28 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
               {isPreparingWorkspace ? "Preparing…" : "Prepare workspace"}
             </button>
             <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">
-              Port: {project?.allocated_port ?? "Not assigned"}
+              Desired: {formatEnumLabel(daemonView.desiredState)}
             </span>
             <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">
-              PID: {project?.daemon_pid ?? "Not running"}
+              Runtime: {daemonView.label}
             </span>
+            <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">Port: {daemonView.port ?? "Not assigned"}</span>
+            <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-slate-300">PID: {daemonView.pid ?? "Not running"}</span>
             <button
               onClick={restartDaemon}
-              disabled={isChangingDaemon}
+              disabled={!canRestartDaemon}
               className="rounded-full border border-cyan-300/30 px-3 py-1 text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
             >
-              Restart daemon
+              {isChangingDaemon ? "Changing daemon…" : "Restart daemon"}
             </button>
             <button
-              onClick={stopDaemon}
-              disabled={isChangingDaemon || (!project?.daemon_pid && !project?.allocated_port)}
+              onClick={() => setIsStopConfirmOpen(true)}
+              disabled={!canStopDaemon}
               className="rounded-full border border-red-300/30 px-3 py-1 text-red-100 hover:bg-red-300/10 disabled:opacity-60"
             >
               Stop daemon
             </button>
-            {!project?.daemon_pid ? (
+            {!daemonView.running ? (
               <div className="flex items-center gap-2">
                 <input
                   value={daemonPortInput}
@@ -575,7 +626,7 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
                 />
                 <button
                   onClick={startDaemon}
-                  disabled={isChangingDaemon}
+                  disabled={!canStartDaemon}
                   className="rounded-full border border-cyan-300/30 px-3 py-1 text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-60"
                 >
                   Start daemon
@@ -583,6 +634,7 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
               </div>
             ) : null}
           </div>
+          <DaemonDiagnosticsPanel daemonView={daemonView} statusError={daemonStatusError} latestEvent={latestDaemonEvent} />
         </div>
         <Link
           href={`/dashboard/projects/${projectId}/audit`}
@@ -614,6 +666,13 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
           </Link>
         </div>
       </nav>
+
+      {latestRecoveryActivity ? (
+        <section className="rounded-2xl border border-amber-300/25 bg-amber-300/10 p-4 text-sm text-amber-100">
+          <p className="font-semibold">Watchdog / recovery activity</p>
+          <p className="mt-1">{latestRecoveryActivity.message || formatActivityKind(latestRecoveryActivity.kind)}</p>
+        </section>
+      ) : null}
 
       {showOverview ? (
       <>
@@ -675,9 +734,10 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-slate-400">
             Runtime preparation auto-locks and starts the daemon as needed, then runs durable background orchestration.
+            {daemonView.desiredState === "STOPPED" ? <span className="mt-1 block text-amber-200">Start or prepare the daemon before dispatching a prompt.</span> : null}
           </p>
           <button
-            disabled={isExecuting}
+            disabled={!canExecutePrompt}
             className="rounded-xl bg-cyan-300 px-4 py-3 text-sm font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isExecuting ? "Dispatching…" : "Run orchestration"}
@@ -687,6 +747,8 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
 
       <ActivityPanel
         latestRun={latestRun}
+        daemonView={daemonView}
+        latestDaemonEvent={latestDaemonEvent}
         lastSubmittedPrompt={lastSubmittedPrompt}
         activities={latestRunActivities}
         artifacts={latestRunArtifacts}
@@ -701,8 +763,8 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
             className="flex w-full items-center justify-between gap-3 text-left"
           >
             <div>
-              <p className="text-sm font-medium text-amber-200">Plan review</p>
-              <h2 className="mt-1 text-lg font-semibold text-white">Generated execution plan</h2>
+              <p className="text-sm font-medium text-amber-200">Execution plan</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Generated steps</h2>
             </div>
             <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-xs text-slate-300">
               {isPlanReviewExpanded ? "Collapse" : "Expand"}
@@ -750,13 +812,16 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
               </div>
             </div>
             <p className="text-sm text-slate-300">{latestRun.prompt}</p>
+            <p className={`rounded-xl border px-4 py-3 text-sm ${runStateSummaryTone(latestRun)}`}>
+              {humanizeLiveRunState(latestRun, daemonView, latestDaemonEvent)}
+            </p>
             {latestRun.stuck_recovery_count > 0 ? (
               <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
                 Recovery attempts: {latestRun.stuck_recovery_count}
                 {latestRun.last_recovery_error ? <span className="mt-2 block text-amber-200/90">Last recovery error: {latestRun.last_recovery_error}</span> : null}
               </div>
             ) : null}
-            {latestRun.last_error ? <p className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{latestRun.last_error}</p> : null}
+            {latestRun.last_error && !(latestRun.status === "CANCELLED" && latestRun.cancellation_reason) ? <p className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{latestRun.last_error}</p> : null}
           </div>
         ) : (
           <p className="mt-4 rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-500">No orchestration runs yet.</p>
@@ -798,25 +863,31 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
         )}
       </section>
 
-      <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
-        <h2 className="text-lg font-semibold text-white">Token usage</h2>
-        {usageSummary ? (
-          <div className="mt-3 grid gap-3 sm:grid-cols-4">
-            <Metric label="Prompt" value={usageSummary.prompt_tokens} />
-            <Metric label="Completion" value={usageSummary.completion_tokens} />
-            <Metric label="Total" value={usageSummary.total_tokens} />
-            <Metric label="Events" value={usageSummary.usage_event_count} />
-          </div>
-        ) : (
-          <p className="mt-3 text-sm text-slate-500">No usage metrics yet.</p>
-        )}
-        <div className="mt-3 rounded-xl border border-white/10 bg-slate-950/70 p-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Latest run usage events ({latestRunUsageEvents.length})</h3>
-          <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(latestRunUsageEvents, null, 2)}</pre>
-        </div>
-      </section>
+      <details className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
+        <summary className="cursor-pointer text-lg font-semibold text-white">Diagnostics & sessions</summary>
+        <p className="mt-2 text-sm text-slate-400">Operational details for debugging. The main overview above reflects the authoritative run and daemon state.</p>
 
-      <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 shadow-xl">
+        <section className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+          <h2 className="text-lg font-semibold text-white">Token usage</h2>
+          {usageSummary ? (
+            <div className="mt-3 grid gap-3 sm:grid-cols-4">
+              <Metric label="Prompt" value={usageSummary.prompt_tokens} />
+              <Metric label="Completion" value={usageSummary.completion_tokens} />
+              <Metric label="Total" value={usageSummary.total_tokens} />
+              <Metric label="Events" value={usageSummary.usage_event_count} />
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">No usage metrics yet.</p>
+          )}
+          {latestRunUsageEvents.length ? (
+            <div className="mt-3 rounded-xl border border-white/10 bg-slate-950/70 p-3">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Latest run usage events ({latestRunUsageEvents.length})</h3>
+              <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(latestRunUsageEvents, null, 2)}</pre>
+            </div>
+          ) : null}
+        </section>
+
+      <section className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 className="text-lg font-semibold text-white">OpenCode sessions</h2>
@@ -827,6 +898,16 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
           </span>
         </div>
 
+        {!sessions.length ? (
+          <div className="mt-4 rounded-2xl border border-dashed border-white/10 bg-slate-950/50 p-4 text-sm text-slate-300">
+            <p className="font-medium text-slate-100">No OpenCode sessions to inspect</p>
+            <p className="mt-2 text-slate-400">
+              {daemonView.running && daemonView.healthState !== "unreachable"
+                ? "The daemon is reachable, but no sessions have been created yet. Submit a prompt or wait for the latest run to create planner/worker sessions."
+                : sessionError || "Sessions are hidden because the daemon runtime is not reachable."}
+            </p>
+          </div>
+        ) : (
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
           <div className="space-y-3">
             <select
@@ -863,12 +944,14 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
                 value={forkTitle}
                 onChange={(event) => setForkTitle(event.target.value)}
                 placeholder="Fork title (optional)"
+                disabled={!selectedSessionId || isSessionActionLoading}
                 className="mt-2 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-xs text-white outline-none focus:border-cyan-300"
               />
               <input
                 value={forkAgent}
                 onChange={(event) => setForkAgent(event.target.value)}
                 placeholder="Agent (optional)"
+                disabled={!selectedSessionId || isSessionActionLoading}
                 className="mt-2 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-xs text-white outline-none focus:border-cyan-300"
               />
               <button
@@ -886,6 +969,7 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
                 onChange={(event) => setSummaryPrompt(event.target.value)}
                 rows={3}
                 placeholder="Optional summary prompt"
+                disabled={!selectedSessionId || isSessionActionLoading}
                 className="mt-2 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-xs text-white outline-none focus:border-cyan-300"
               />
               <button
@@ -906,24 +990,28 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
                 {isLoadingSessionDetails ? "Loading session details…" : "Select a session to inspect details."}
               </p>
             )}
-            <div className="grid gap-3 xl:grid-cols-3">
-              <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Messages ({sessionMessages.length})</h3>
-                <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionMessages, null, 2)}</pre>
-              </section>
-              <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Diff ({sessionDiff.length})</h3>
-                <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionDiff, null, 2)}</pre>
-              </section>
-              <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Todos ({sessionTodos.length})</h3>
-                <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionTodos, null, 2)}</pre>
-              </section>
-            </div>
+            {selectedSession ? (
+              <div className="grid gap-3 xl:grid-cols-3">
+                <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Messages ({sessionMessages.length})</h3>
+                  {sessionMessages.length ? <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionMessages, null, 2)}</pre> : <p className="rounded-lg border border-dashed border-white/10 p-3 text-xs text-slate-500">No messages loaded for this session.</p>}
+                </section>
+                <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Diff ({sessionDiff.length})</h3>
+                  {sessionDiff.length ? <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionDiff, null, 2)}</pre> : <p className="rounded-lg border border-dashed border-white/10 p-3 text-xs text-slate-500">No diff available yet.</p>}
+                </section>
+                <section className="rounded-xl border border-white/10 bg-slate-950/70 p-3">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Todos ({sessionTodos.length})</h3>
+                  {sessionTodos.length ? <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950/80 p-2 text-[11px] text-slate-300">{JSON.stringify(sessionTodos, null, 2)}</pre> : <p className="rounded-lg border border-dashed border-white/10 p-3 text-xs text-slate-500">No session todos reported.</p>}
+                </section>
+              </div>
+            ) : null}
             {sessionError ? <p className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{sessionError}</p> : null}
           </div>
         </div>
+        )}
       </section>
+      </details>
 
       {error ? <div className="rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
       </>
@@ -970,6 +1058,14 @@ export function KanbanBoard({ projectId, section = "overview" }: { projectId: nu
       ) : null}
 
       <TaskDetailsModal task={expandedTask} onClose={() => setExpandedTask(null)} onApprove={approveTask} onReject={setRejectingTask} />
+      <StopDaemonConfirmModal
+        isOpen={isStopConfirmOpen}
+        isSubmitting={isChangingDaemon}
+        activeRunCount={activeRuns.length}
+        daemonLabel={daemonView.label}
+        onCancel={() => setIsStopConfirmOpen(false)}
+        onConfirm={stopDaemon}
+      />
       <RejectionModal
         isOpen={Boolean(rejectingTask)}
         title={rejectingTask ? `Reject task #${rejectingTask.id}` : "Reject task"}
@@ -996,14 +1092,89 @@ function PathPill({ label, value, helper }: { label: string; value: string | nul
   )
 }
 
+function DaemonDiagnosticsPanel({
+  daemonView,
+  statusError,
+  latestEvent,
+}: {
+  daemonView: DaemonView
+  statusError: string
+  latestEvent?: WorkspaceEvent
+}) {
+  return (
+    <section className={`mt-4 rounded-2xl border p-4 text-sm ${daemonView.tone}`} aria-live="polite">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="font-semibold">Daemon diagnostics: {daemonView.label}</p>
+          <p className="mt-1 text-slate-300">{daemonView.description}</p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full border border-white/10 bg-slate-950/50 px-3 py-1">desired {formatEnumLabel(daemonView.desiredState)}</span>
+          <span className="rounded-full border border-white/10 bg-slate-950/50 px-3 py-1">health {daemonView.healthState}</span>
+          {daemonView.stopRequestedAt ? <span className="rounded-full border border-white/10 bg-slate-950/50 px-3 py-1">stop requested {formatDateTime(daemonView.stopRequestedAt)}</span> : null}
+          {daemonView.lastHeartbeatAt ? <span className="rounded-full border border-white/10 bg-slate-950/50 px-3 py-1">heartbeat {formatDateTime(daemonView.lastHeartbeatAt)}</span> : null}
+        </div>
+      </div>
+      {statusError ? <p className="mt-3 rounded-xl bg-red-500/10 px-3 py-2 text-red-200">Status check failed: {statusError}</p> : null}
+      {daemonView.failureReason ? <p className="mt-3 rounded-xl bg-red-500/10 px-3 py-2 text-red-200">{daemonView.failureReason}</p> : null}
+      {latestEvent ? <p className="mt-3 text-xs text-slate-400">Latest daemon signal: {humanizeWorkspaceEvent(latestEvent)}</p> : null}
+    </section>
+  )
+}
+
+function StopDaemonConfirmModal({
+  isOpen,
+  isSubmitting,
+  activeRunCount,
+  daemonLabel,
+  onCancel,
+  onConfirm,
+}: {
+  isOpen: boolean
+  isSubmitting: boolean
+  activeRunCount: number
+  daemonLabel: string
+  onCancel: () => void
+  onConfirm: () => Promise<void>
+}) {
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" role="dialog" aria-modal="true" aria-label="Confirm daemon stop">
+      <div className="w-full max-w-lg rounded-2xl border border-red-300/25 bg-slate-900 p-5 shadow-2xl">
+        <p className="text-sm font-semibold text-red-200">Stop daemon?</p>
+        <h3 className="mt-2 text-xl font-semibold text-white">This will cancel active runs</h3>
+        <p className="mt-3 text-sm leading-6 text-slate-300">
+          Current runtime state is <span className="font-medium text-slate-100">{daemonLabel}</span>. Stopping the daemon will mark active runs as cancelled and release the workspace lock.
+        </p>
+        <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+          Active runs that will be cancelled: {activeRunCount}
+        </div>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button onClick={onCancel} disabled={isSubmitting} className="rounded-xl border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-white/10 disabled:opacity-60">
+            Keep daemon running
+          </button>
+          <button onClick={onConfirm} disabled={isSubmitting} className="rounded-xl bg-red-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-red-200 disabled:opacity-60">
+            {isSubmitting ? "Stopping…" : "Stop daemon and cancel runs"}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ActivityPanel({
   latestRun,
+  daemonView,
+  latestDaemonEvent,
   lastSubmittedPrompt,
   activities,
   artifacts,
   events,
 }: {
   latestRun: OrchestrationRun | null
+  daemonView: DaemonView
+  latestDaemonEvent?: WorkspaceEvent
   lastSubmittedPrompt: string
   activities: OrchestrationRunActivity[]
   artifacts: OrchestrationArtifact[]
@@ -1035,7 +1206,7 @@ function ActivityPanel({
         {latestRun ? (
           <div className="max-w-3xl rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Foundry-AI</p>
-            <p className="mt-2 text-sm text-slate-200">{humanizeRunStatus(latestRun)}</p>
+            <p className="mt-2 text-sm text-slate-200">{humanizeLiveRunState(latestRun, daemonView, latestDaemonEvent)}</p>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-900">
               <div className="h-full rounded-full bg-cyan-300 transition-all" style={{ width: `${latestRun.progress_percent}%` }} />
             </div>
@@ -1103,13 +1274,9 @@ function PlanReviewPanel({
   return (
     <section className={`rounded-3xl border p-4 shadow-xl ${awaitingApproval ? "border-amber-300/25 bg-amber-300/[0.05]" : "border-white/10 bg-white/[0.04]"}`}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <p className="text-sm font-medium text-amber-200">Plan review</p>
-          <h2 className="mt-1 text-lg font-semibold text-white">Generated execution plan</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            {awaitingApproval ? "This complex plan is paused for your review. Edit steps, approve, or request a replan." : "This is the persisted plan snapshot for the latest run."}
-          </p>
-        </div>
+        <p className="text-sm text-slate-400">
+          {awaitingApproval ? "This complex plan is paused for review. Edit steps, approve, or request a replan." : "Persisted plan snapshot for the latest run."}
+        </p>
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{formatEnumLabel(plan.complexity_level)}</span>
           <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-slate-300">{activeSteps.length} step{activeSteps.length === 1 ? "" : "s"}</span>
@@ -1237,6 +1404,166 @@ function RunStatusBadge({ run }: { run: OrchestrationRun }) {
   )
 }
 
+type DaemonView = {
+  desiredState: Project["daemon_desired_state"]
+  running: boolean
+  hasPort: boolean
+  port: number | null
+  pid: number | null
+  healthState: string
+  label: string
+  description: string
+  tone: string
+  stopRequestedAt: string | null
+  lastHeartbeatAt: string | null
+  failureReason: string
+}
+
+function deriveDaemonView(project: Project | null, status: DaemonStatus | null, isChangingDaemon: boolean, latestEvent?: WorkspaceEvent): DaemonView {
+  const desiredState = status?.daemon_desired_state ?? project?.daemon_desired_state ?? "STOPPED"
+  const healthState = status?.health.state ?? (status?.running ? "unknown" : "unreachable")
+  const stopRequestedAt = status?.daemon_stop_requested_at ?? project?.daemon_stop_requested_at ?? null
+  const lastHeartbeatAt = status?.daemon_last_heartbeat_at ?? project?.daemon_last_heartbeat_at ?? null
+  const running = Boolean(status?.running ?? project?.daemon_pid)
+  const hasPort = Boolean(status?.allocated_port ?? project?.allocated_port)
+  const pid = status?.daemon_pid ?? project?.daemon_pid ?? null
+  const port = status?.allocated_port ?? project?.allocated_port ?? null
+
+  if (latestEvent?.kind === "daemon_stop_failed") {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: "Stop failed",
+      description: "The backend could not stop the daemon. Review daemon status before dispatching more work.",
+      tone: "border-red-300/25 bg-red-300/10 text-red-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: latestEvent.error || latestEvent.message || "Daemon stop failed.",
+    }
+  }
+
+  if (latestEvent?.kind === "daemon_restart_failed") {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: "Restart failed",
+      description: "Watchdog or manual restart failed; active runs may have been failed and the lock released.",
+      tone: "border-red-300/25 bg-red-300/10 text-red-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: latestEvent.error || latestEvent.message || "Daemon restart failed.",
+    }
+  }
+
+  if (isChangingDaemon) {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: "Changing",
+      description: "A daemon lifecycle operation is in progress.",
+      tone: "border-cyan-300/25 bg-cyan-300/10 text-cyan-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: "",
+    }
+  }
+
+  if (desiredState === "STOPPED") {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: running ? "Stopping / stale runtime" : "Stopped",
+      description: running ? "Backend desired state is stopped, but runtime is still visible." : "Daemon is intentionally stopped.",
+      tone: running ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-slate-300/15 bg-slate-300/5 text-slate-200",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: "",
+    }
+  }
+
+  if (status?.health.busy || healthState === "busy") {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: "Busy",
+      description: "Daemon is reachable but busy with model/tool work. This is not a failure.",
+      tone: "border-cyan-300/25 bg-cyan-300/10 text-cyan-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: "",
+    }
+  }
+
+  if (status?.running && status.health.reachable && status.health.healthy) {
+    return {
+      desiredState,
+      running: true,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: "Healthy",
+      description: "Daemon desired state and runtime health agree.",
+      tone: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: "",
+    }
+  }
+
+  if (running || desiredState === "RUNNING") {
+    return {
+      desiredState,
+      running,
+      hasPort,
+      port,
+      pid,
+      healthState,
+      label: running ? "Unhealthy" : "Unreachable",
+      description: running ? "A daemon process or port exists, but health is not good." : "Backend wants the daemon running, but runtime is unreachable.",
+      tone: "border-red-300/25 bg-red-300/10 text-red-100",
+      stopRequestedAt,
+      lastHeartbeatAt,
+      failureReason: "",
+    }
+  }
+
+  return {
+    desiredState,
+    running,
+    hasPort,
+    port,
+    pid,
+    healthState,
+    label: "Not started",
+    description: "Daemon has not been started for this workspace.",
+    tone: "border-slate-300/15 bg-slate-300/5 text-slate-200",
+    stopRequestedAt,
+    lastHeartbeatAt,
+    failureReason: "",
+  }
+}
+
 function humanizeRunStatus(run: OrchestrationRun) {
   if (run.status === "PLAN_READY") return "Plan is ready and waiting for final orchestration transition."
   if (run.status === "AWAITING_PLAN_APPROVAL") return `I drafted a ${run.complexity_level.toLowerCase()} plan and paused for your approval.`
@@ -1248,8 +1575,50 @@ function humanizeRunStatus(run: OrchestrationRun) {
   if (run.status === "VERIFYING") return `I’m verifying the latest changes${run.current_phase ? `: ${run.current_phase}` : "."}`
   if (run.status === "COMPLETED") return "The run completed successfully."
   if (run.status === "FAILED") return run.last_error || "The run failed and needs review."
-  if (run.status === "CANCELLED") return "The run was cancelled before completion."
+  if (run.status === "CANCELLED") return run.cancellation_reason ? humanizeCancellationReason(run.cancellation_reason) : "The run was cancelled before completion."
   return run.current_phase || run.status
+}
+
+function humanizeLiveRunState(run: OrchestrationRun, daemonView: DaemonView, latestDaemonEvent?: WorkspaceEvent) {
+  if (run.status === "CANCELLED") {
+    return run.cancellation_reason ? `Cancelled: ${formatEnumLabel(run.cancellation_reason)} — ${run.last_error || humanizeCancellationReason(run.cancellation_reason)}` : "The run was cancelled before completion."
+  }
+
+  if (run.status === "FAILED") {
+    if (latestDaemonEvent?.kind === "daemon_restart_failed") return `The run failed after daemon restart failed${latestDaemonEvent.error ? `: ${latestDaemonEvent.error}` : "."}`
+    if (daemonView.label === "Unhealthy" || daemonView.label === "Unreachable") return run.last_error || `The run failed while the daemon was ${daemonView.label.toLowerCase()}.`
+    return run.last_error || "The run failed and needs review."
+  }
+
+  if (ACTIVE_RUN_STATUSES.has(run.status)) {
+    if (latestDaemonEvent?.kind === "daemon_stop_requested") return "Daemon stop was requested. If the stop succeeds, this active run will be cancelled and the lock released."
+    if (daemonView.label === "Changing") return "Daemon lifecycle is changing. Run state may pause until the runtime settles."
+    if (daemonView.label === "Busy") return `The daemon is busy and the run is still active${run.current_phase ? `: ${run.current_phase}` : "."}`
+    if (daemonView.label === "Unhealthy" || daemonView.label === "Unreachable" || daemonView.label === "Restart failed") return `The run is active, but daemon runtime is ${daemonView.label.toLowerCase()}. Watchdog/recovery may intervene.`
+  }
+
+  return humanizeRunStatus(run)
+}
+
+function runStateSummaryTone(run: OrchestrationRun) {
+  if (run.status === "FAILED") return "border-red-300/20 bg-red-500/10 text-red-200"
+  if (run.status === "CANCELLED") return "border-amber-300/20 bg-amber-300/10 text-amber-100"
+  if (ACTIVE_RUN_STATUSES.has(run.status)) return "border-cyan-300/20 bg-cyan-300/10 text-cyan-100"
+  return "border-white/10 bg-slate-950/50 text-slate-200"
+}
+
+function humanizeCancellationReason(reason: OrchestrationRun["cancellation_reason"]) {
+  if (reason === "MANUAL_DAEMON_STOP") return "The run was cancelled because the daemon was manually stopped."
+  if (reason === "DAEMON_STOPPED") return "The run was cancelled because the daemon desired state is stopped."
+  if (reason === "DAEMON_CRASHED") return "The run was cancelled after the daemon crashed."
+  if (reason === "DAEMON_RESTART_FAILED") return "The run was cancelled because daemon restart failed."
+  if (reason === "WORKER_CRASHED") return "The run was cancelled after the worker crashed or disconnected."
+  if (reason === "RECOVERY_EXHAUSTED") return "The run was cancelled after automated recovery was exhausted."
+  return "The run was cancelled before completion."
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString()
 }
 
 function formatEnumLabel(value: string) {
@@ -1284,6 +1653,13 @@ function humanizeWorkspaceEvent(event: WorkspaceEvent) {
   if (event.kind === "task_status_changed") return `Step #${event.sequence_order} @${event.assigned_agent} is ${formatEnumLabel(event.status ?? "updated")}.`
   if (event.kind === "approval_requested") return `Approval requested for run #${event.run_id}.`
   if (event.kind === "lock_status_changed") return event.is_locked ? `Workspace locked by ${event.locked_by ?? "unknown"}.` : "Workspace unlocked."
+  if (event.kind === "lock_expired") return "Stale workspace lock expired automatically."
+  if (event.kind === "daemon_stop_requested") return "Daemon stop requested. Active runs will be cancelled if stop succeeds."
+  if (event.kind === "daemon_stopped") return "Daemon stopped and active runs were cancelled."
+  if (event.kind === "daemon_stop_failed") return `Daemon stop failed${event.error || event.message ? `: ${event.error || event.message}` : "."}`
+  if (event.kind === "daemon_recovered") return `Daemon recovered${event.new_pid ? ` with PID ${event.new_pid}` : ""}.`
+  if (event.kind === "daemon_restart_failed") return `Daemon restart failed${event.error ? `: ${event.error}` : "."}`
+  if (event.kind === "run_cancelled_by_daemon_stop") return `Run #${event.run_id} cancelled because daemon stopped.`
   if (event.kind === "github_sync_updated") return `GitHub sync ${formatEnumLabel(event.sync_status ?? "updated")}${event.pr_url ? ` · PR ${event.pr_url}` : ""}.`
   return event.kind.replaceAll("_", " ")
 }

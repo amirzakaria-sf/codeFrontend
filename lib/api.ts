@@ -1,6 +1,7 @@
 import { clearTokens, getAccessToken, getRefreshToken, setAccessToken, setTokens } from "./token-storage"
 import type {
   AuditLog,
+  DaemonStatus,
   ExecuteResponse,
   GitSyncJob,
   LoginResponse,
@@ -266,10 +267,7 @@ export const api = {
         body: JSON.stringify(allocated_port ? { allocated_port } : {}),
       },
     ),
-  daemonStatus: (projectId: number) =>
-    request<{ project_id: number; daemon_pid: number | null; allocated_port: number | null; running: boolean; health: { reachable: boolean; healthy: boolean; version?: string } }>(
-      `/projects/${projectId}/daemon-status/`,
-    ),
+  daemonStatus: (projectId: number) => request<DaemonStatus>(`/projects/${projectId}/daemon-status/`),
   executePrompt: (projectId: number, prompt: string) =>
     request<ExecuteResponse>(`/projects/${projectId}/execute/`, {
       method: "POST",
